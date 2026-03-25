@@ -1,0 +1,37 @@
+/* Copyright (C) 2007-2016 Open Information Security Foundation
+ *
+ * You can copy, redistribute or modify this Program under the terms of
+ * the GNU General Public License version 2 as published by the Free
+ * Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * version 2 along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
+ */
+
+/**
+ * \file
+ *
+ * \author Justin Viiret <justin.viiret@intel.com>
+ *
+ * Support functions for Hyperscan library integration.
+ */
+
+#ifndef SURICATA_UTIL_HYPERSCAN__H
+#define SURICATA_UTIL_HYPERSCAN__H
+
+#ifdef BUILD_HYPERSCAN
+#include <hs.h>
+
+char *HSRenderPattern(const uint8_t *pat, uint16_t pat_len);
+
+void HSLogCompileError(const char *expr, hs_compile_error_t *compile_err, hs_error_t err);
+
+#endif /* BUILD_HYPERSCAN */
+#endif /* SURICATA_UTIL_HYPERSCAN__H */
