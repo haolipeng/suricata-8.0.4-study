@@ -1,13 +1,3 @@
----
-title: "配置文件全解析"
-series: "Suricata 深度解析"
-number: 03
-author: ""
-date: 2026-03-12
-version: "Suricata 8.0.3"
-keywords: [suricata, yaml, 配置, 网络变量, 输出, 应用层协议]
----
-
 # 03 - 配置文件全解析
 
 > `suricata.yaml` 是 Suricata 的核心配置文件，长达 2300+ 行，控制着引擎的方方面面。本文将系统梳理其结构，理解每个配置段的作用，并结合 `src/conf.c` 源码理解配置加载机制。
@@ -24,8 +14,6 @@ suricata.yaml 整体结构
 ├── Step 4: 应用层协议 ────────── app-layer.protocols.*
 └── 高级设置 ─────────────────── 检测引擎、流处理、线程、性能分析等
 ```
-
-配置文件模板位于 `suricata.yaml.in`，编译安装时通过 autoconf 替换变量（如 `@e_logdir@`、`@e_sysconfdir@`）生成最终的 `suricata.yaml`。
 
 ## Step 1：网络定义（vars）
 
