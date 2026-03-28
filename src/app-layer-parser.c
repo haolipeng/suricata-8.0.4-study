@@ -1821,6 +1821,7 @@ void AppLayerParserRegisterProtocolParsers(void)
     SCRegisterTelnetParser();
     RegisterIMAPParsers();
     SCRegisterIec61850MmsParser();
+    SCRegisterIec104Parser();
 
     for (size_t i = 0; i < preregistered_callbacks_nb; i++) {
         PreRegisteredCallbacks[i]();

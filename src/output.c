@@ -997,6 +997,8 @@ void OutputRegisterRootLoggers(void)
             ALPROTO_TEMPLATE, (EveJsonSimpleTxLogFunc)SCTemplateLoggerLog, NULL);
     RegisterSimpleJsonApplayerLogger(
             ALPROTO_IEC61850_MMS, (EveJsonSimpleTxLogFunc)SCIec61850MmsLoggerLog, "iec61850_mms");
+    RegisterSimpleJsonApplayerLogger(
+            ALPROTO_IEC104, (EveJsonSimpleTxLogFunc)SCIec104LoggerLog, "iec104");
     RegisterSimpleJsonApplayerLogger(ALPROTO_RDP, (EveJsonSimpleTxLogFunc)SCRdpToJson, NULL);
     // special case : http2 is logged in http object
     RegisterSimpleJsonApplayerLogger(ALPROTO_HTTP2, (EveJsonSimpleTxLogFunc)SCHttp2LogJson, "http");
@@ -1247,6 +1249,10 @@ void OutputRegisterLoggers(void)
     }
     /* ARP JSON logger */
     JsonArpLogRegister();
+    /* IEC 104 JSON logger */
+    OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonIec104Log", "eve-log.iec104",
+            OutputJsonLogInitSub, ALPROTO_IEC104, JsonGenericDirPacketLogger,
+            JsonLogThreadInit, JsonLogThreadDeinit);
 
     for (size_t i = 0; i < preregistered_loggers_nb; i++) {
         OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", preregistered_loggers[i].logname,

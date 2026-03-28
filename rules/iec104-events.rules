@@ -1,0 +1,9 @@
+# IEC 60870-5-104 application layer events rules
+
+alert iec104 any any -> any any (msg:"SURICATA IEC104 too many transactions"; app-layer-event:iec104.too_many_transactions; classtype:protocol-command-decode; sid:2260001; rev:1;)
+alert iec104 any any -> any any (msg:"SURICATA IEC104 malformed APCI frame"; app-layer-event:iec104.malformed_apci; classtype:protocol-command-decode; sid:2260002; rev:1;)
+alert iec104 any any -> any any (msg:"SURICATA IEC104 malformed ASDU"; app-layer-event:iec104.malformed_asdu; classtype:protocol-command-decode; sid:2260003; rev:1;)
+alert iec104 any any -> any any (msg:"SURICATA IEC104 invalid type ID"; app-layer-event:iec104.invalid_type_id; classtype:protocol-command-decode; sid:2260004; rev:1;)
+alert iec104 any any -> any any (msg:"SURICATA IEC104 invalid cause of transmission"; app-layer-event:iec104.invalid_cot; classtype:protocol-command-decode; sid:2260005; rev:1;)
+alert iec104 any any -> any any (msg:"SURICATA IEC104 invalid APDU length"; app-layer-event:iec104.invalid_apdu_length; classtype:protocol-command-decode; sid:2260006; rev:1;)
+alert iec104 any any -> any any (msg:"SURICATA IEC104 unexpected U-frame function"; app-layer-event:iec104.unexpected_u_frame; classtype:protocol-command-decode; sid:2260007; rev:1;)

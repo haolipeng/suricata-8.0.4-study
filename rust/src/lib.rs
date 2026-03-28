@@ -125,6 +125,7 @@ pub mod enip;
 pub mod pop3;
 pub mod applayertemplate;
 pub mod iec61850mms;
+pub mod iec104;
 pub mod rdp;
 pub mod x509;
 pub mod asn1;

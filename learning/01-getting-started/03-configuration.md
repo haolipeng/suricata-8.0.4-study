@@ -153,7 +153,7 @@ outputs:
 | `unix_stream` | Unix 流套接字 | 可靠本地传输 |
 | `redis` | Redis 推送 | 分布式日志收集 |
 
-**Community Flow ID**：生成跨工具统一的流标识符，便于与 Zeek（原 Bro）等工具进行关联分析。
+**Community Flow ID**：生成跨工具统一的流标识符，便于与 Zeek等工具进行关联分析。
 
 #### EVE 事件类型配置
 
@@ -206,24 +206,9 @@ outputs:
 - 开发/学习环境：全部启用，便于观察所有事件
 - 生产环境：根据需要选择性启用，减少磁盘 I/O
 
-#### Redis 输出配置
-
-```yaml
-      # 适用于分布式部署
-      redis:
-        server: 127.0.0.1
-        port: 6379
-        async: true
-        mode: list     # list|rpush|channel|publish|xadd|stream
-        key: suricata
-        pipelining:
-          enabled: yes
-          batch-size: 10
-```
-
 ### 日志框架（logging）
 
-Suricata 自身的运行日志（不是检测日志）：
+Suricata 自身的运行日志：
 
 ```yaml
 logging:
@@ -244,6 +229,12 @@ logging:
 ```
 
 调试时可以设置 `default-log-level: debug`，但注意 debug 级别会产生大量日志。
+
+notice和info级别的日志区别是什么？
+
+notice:用于记录需要管理员注意的重要信息，默认情况下会显示error、warning和notice级别的消息
+
+info:提供系统运行过程中的详细信息，用于调试和监控
 
 ## Step 3：抓包配置
 
@@ -336,13 +327,13 @@ HTTP 是最复杂的协议配置，使用 libhtp 库解析：
       libhtp:
         default-config:
           personality: IDS                        # 解析器行为特性
-          request-body-limit: 100 KiB             # 请求体检查限制
-          response-body-limit: 100 KiB            # 响应体检查限制
-          request-body-minimal-inspect-size: 32 KiB
-          request-body-inspect-window: 4 KiB
+          request-body-limit: 100 KiB             # 请求体大小限制
+          response-body-limit: 100 KiB            # 响应体大小限制
+          request-body-minimal-inspect-size: 32 KiB # 请求体的最小检查大小
+          request-body-inspect-window: 4 KiB #请求体的检查窗口大小
           response-body-minimal-inspect-size: 40 KiB
           response-body-inspect-window: 16 KiB
-          response-body-decompress-layer-limit: 2 # 解压层数限制
+          response-body-decompress-layer-limit: 2 # 响应体的解压层数限制
           http-body-inline: auto
           double-decode-path: no
           double-decode-query: no
@@ -395,29 +386,7 @@ HTTP 是最复杂的协议配置，使用 libhtp 库解析：
 
 DNS 同时支持 TCP 和 UDP 两种传输方式。
 
-#### SSH
 
-```yaml
-    ssh:
-      enabled: yes
-      #hassh: no              # HASSH 指纹
-      #encryption-handling: track-only
-```
-
-#### SMTP
-
-```yaml
-    smtp:
-      enabled: yes
-      raw-extraction: no
-      mime:
-        decode-mime: yes
-        decode-base64: yes
-        decode-quoted-printable: yes
-        header-value-depth: 2000
-        extract-urls: yes
-        body-md5: no
-```
 
 #### 工控协议
 
@@ -439,33 +408,7 @@ DNS 同时支持 TCP 和 UDP 两种传输方式。
 
 Suricata 对工控协议（ICS/SCADA）的支持使其适用于工业网络安全监控。
 
-#### 其他协议
 
-```yaml
-    # 完整的协议列表
-    telnet:     { enabled: yes }
-    rfb:        { enabled: yes }    # 远程帧缓冲（VNC）
-    mqtt:       { enabled: yes }    # MQTT 物联网协议
-    krb5:       { enabled: yes }    # Kerberos
-    snmp:       { enabled: yes }
-    ike:        { enabled: yes }    # IKE/IPSec
-    nfs:        { enabled: yes }
-    tftp:       { enabled: yes }
-    ftp:        { enabled: yes }
-    smb:        { enabled: yes }
-    dcerpc:     { enabled: yes }
-    ssh:        { enabled: yes }
-    http2:      { enabled: yes }
-    doh2:       { enabled: yes }    # DNS over HTTPS
-    pgsql:      { enabled: no }     # PostgreSQL（默认关闭）
-    websocket:  { enabled: yes }
-    rdp:        { enabled: yes }
-    pop3:       { enabled: yes }
-    imap:       { enabled: detection-only }
-    bittorrent-dht: { enabled: yes }
-    sip:        { enabled: yes }
-    ldap:       { enabled: yes }
-```
 
 ## 高级设置
 
@@ -494,11 +437,11 @@ security:
 
 ```yaml
 stream:
-  memcap: 64 MiB             # TCP 重组内存上限
-  checksum-validation: yes    # 校验和检查
+  memcap: 64 MiB             # 流跟踪引擎内存上限
+  checksum-validation: yes    # 检查校验和
   inline: auto                # IPS 模式下自动启用内联处理
   reassembly:
-    memcap: 256 MiB           # 重组缓冲区内存上限
+    memcap: 256 MiB           # 重组引擎内存上限
     depth: 1 MiB              # 重组深度
     toserver-chunk-size: 2560 # 客户端方向块大小
     toclient-chunk-size: 2560 # 服务端方向块大小

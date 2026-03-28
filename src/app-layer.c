@@ -1074,6 +1074,8 @@ static void AppLayerNamesSetup(void)
     AppProtoRegisterProtoString(ALPROTO_HTTP2, "http2");
     AppProtoRegisterProtoString(ALPROTO_BITTORRENT_DHT, "bittorrent-dht");
     AppProtoRegisterProtoString(ALPROTO_POP3, "pop3");
+    AppProtoRegisterProtoString(ALPROTO_IEC61850_MMS, "iec61850-mms");
+    AppProtoRegisterProtoString(ALPROTO_IEC104, "iec104");
     AppProtoRegisterProtoString(ALPROTO_HTTP, "http");
 }
 

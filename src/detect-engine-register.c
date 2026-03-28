@@ -773,6 +773,7 @@ void SigTableSetup(void)
     SCDetectSipRegister();
     SCDetectTemplateRegister();
     SCDetectIec61850MmsRegister();
+    SCDetectIec104Register();
     SCDetectLdapRegister();
     SCDetectSdpRegister();
     SCDetectDNSRegister();
