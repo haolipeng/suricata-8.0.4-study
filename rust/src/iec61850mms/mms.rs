@@ -17,7 +17,7 @@
 
 //! IEC 61850 MMS app-layer state machine.
 
-use super::mms_pdu::MmsPdu;
+use super::mms_pdu::{self, MmsPdu};
 use super::parser;
 use crate::applayer::*;
 use crate::conf::conf_get;
@@ -201,15 +201,44 @@ impl MmsState {
                     if frame.cotp.pdu_type == parser::CotpPduType::DataTransfer
                         && !frame.payload.is_empty()
                     {
-                        match super::mms_pdu::parse_mms_pdu(frame.payload) {
-                            Ok(pdu) => {
-                                self.handle_mms_pdu(pdu, is_request);
+                        let mms_data = if mms_pdu::is_direct_mms_pdu(frame.payload) {
+                            // Direct MMS PDU (mms-* pcap format)
+                            Some(frame.payload)
+                        } else {
+                            // May have Session/Presentation layers (iec61850_* pcap format)
+                            match mms_pdu::extract_mms_from_session(frame.payload) {
+                                Ok(Some(data)) => Some(data),
+                                Ok(None) => {
+                                    // Session CONNECT/ACCEPT → create Initiate transaction
+                                    let pdu = if is_request {
+                                        MmsPdu::InitiateRequest
+                                    } else {
+                                        MmsPdu::InitiateResponse
+                                    };
+                                    self.handle_mms_pdu(pdu, is_request);
+                                    None
+                                }
+                                Err(_) => {
+                                    let mut tx = self.new_tx();
+                                    tx.tx_data
+                                        .set_event(Iec61850MmsEvent::MalformedData as u8);
+                                    self.transactions.push_back(tx);
+                                    None
+                                }
                             }
-                            Err(_) => {
-                                let mut tx = self.new_tx();
-                                tx.tx_data
-                                    .set_event(Iec61850MmsEvent::MalformedData as u8);
-                                self.transactions.push_back(tx);
+                        };
+
+                        if let Some(data) = mms_data {
+                            match mms_pdu::parse_mms_pdu(data) {
+                                Ok(pdu) => {
+                                    self.handle_mms_pdu(pdu, is_request);
+                                }
+                                Err(_) => {
+                                    let mut tx = self.new_tx();
+                                    tx.tx_data
+                                        .set_event(Iec61850MmsEvent::MalformedData as u8);
+                                    self.transactions.push_back(tx);
+                                }
                             }
                         }
                     } else {

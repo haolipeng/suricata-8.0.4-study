@@ -42,38 +42,89 @@ use std::fmt;
 /// MMS confirmed service request types.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MmsConfirmedService {
+    Status,
     GetNameList,
     Identify,
+    Rename,
     Read,
     Write,
     GetVariableAccessAttributes,
+    GetCapabilityList,
     DefineNamedVariableList,
     GetNamedVariableListAttributes,
     DeleteNamedVariableList,
-    GetCapabilityList,
+    TakeControl,
+    RelinquishControl,
+    InitiateDownloadSequence,
+    DownloadSegment,
+    TerminateDownloadSequence,
+    InitiateUploadSequence,
+    UploadSegment,
+    TerminateUploadSequence,
+    RequestDomainDownload,
+    RequestDomainUpload,
+    LoadDomainContent,
+    StoreDomainContent,
+    DeleteDomain,
+    GetDomainAttributes,
+    CreateProgramInvocation,
+    DeleteProgramInvocation,
+    Start,
+    Stop,
+    Resume,
+    Reset,
+    Kill,
+    GetProgramInvocationAttributes,
+    GetAlarmSummary,
     ObtainFile,
     FileOpen,
     FileRead,
     FileClose,
-    FileDirectory,
-    FileDelete,
     FileRename,
-    Unknown(u8),
+    FileDelete,
+    FileDirectory,
+    Unknown(u32),
 }
 
 impl MmsConfirmedService {
     /// Parse the confirmed service tag (context-specific tag within Confirmed-RequestPDU).
-    pub fn from_request_tag(tag: u8) -> Self {
+    pub fn from_request_tag(tag: u32) -> Self {
         // Tags for ConfirmedServiceRequest CHOICE
         match tag {
+            0 => MmsConfirmedService::Status,
             1 => MmsConfirmedService::GetNameList,
             2 => MmsConfirmedService::Identify,
+            3 => MmsConfirmedService::Rename,
             4 => MmsConfirmedService::Read,
             5 => MmsConfirmedService::Write,
             6 => MmsConfirmedService::GetVariableAccessAttributes,
+            10 => MmsConfirmedService::GetCapabilityList,
             11 => MmsConfirmedService::DefineNamedVariableList,
             12 => MmsConfirmedService::GetNamedVariableListAttributes,
             13 => MmsConfirmedService::DeleteNamedVariableList,
+            19 => MmsConfirmedService::TakeControl,
+            20 => MmsConfirmedService::RelinquishControl,
+            26 => MmsConfirmedService::InitiateDownloadSequence,
+            27 => MmsConfirmedService::DownloadSegment,
+            28 => MmsConfirmedService::TerminateDownloadSequence,
+            29 => MmsConfirmedService::InitiateUploadSequence,
+            30 => MmsConfirmedService::UploadSegment,
+            31 => MmsConfirmedService::TerminateUploadSequence,
+            32 => MmsConfirmedService::RequestDomainDownload,
+            33 => MmsConfirmedService::RequestDomainUpload,
+            34 => MmsConfirmedService::LoadDomainContent,
+            35 => MmsConfirmedService::StoreDomainContent,
+            36 => MmsConfirmedService::DeleteDomain,
+            37 => MmsConfirmedService::GetDomainAttributes,
+            38 => MmsConfirmedService::CreateProgramInvocation,
+            39 => MmsConfirmedService::DeleteProgramInvocation,
+            40 => MmsConfirmedService::Start,
+            41 => MmsConfirmedService::Stop,
+            42 => MmsConfirmedService::Resume,
+            43 => MmsConfirmedService::Reset,
+            44 => MmsConfirmedService::Kill,
+            45 => MmsConfirmedService::GetProgramInvocationAttributes,
+            63 => MmsConfirmedService::GetAlarmSummary,
             72 => MmsConfirmedService::ObtainFile,
             73 => MmsConfirmedService::FileOpen,
             74 => MmsConfirmedService::FileRead,
@@ -86,24 +137,51 @@ impl MmsConfirmedService {
     }
 
     /// Parse the confirmed service tag from a response.
-    pub fn from_response_tag(tag: u8) -> Self {
+    pub fn from_response_tag(tag: u32) -> Self {
         // Response tags mirror request tags for most services
         Self::from_request_tag(tag)
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
+            MmsConfirmedService::Status => "status",
             MmsConfirmedService::GetNameList => "get_name_list",
             MmsConfirmedService::Identify => "identify",
+            MmsConfirmedService::Rename => "rename",
             MmsConfirmedService::Read => "read",
             MmsConfirmedService::Write => "write",
             MmsConfirmedService::GetVariableAccessAttributes => "get_variable_access_attributes",
+            MmsConfirmedService::GetCapabilityList => "get_capability_list",
             MmsConfirmedService::DefineNamedVariableList => "define_named_variable_list",
             MmsConfirmedService::GetNamedVariableListAttributes => {
                 "get_named_variable_list_attributes"
             }
             MmsConfirmedService::DeleteNamedVariableList => "delete_named_variable_list",
-            MmsConfirmedService::GetCapabilityList => "get_capability_list",
+            MmsConfirmedService::TakeControl => "take_control",
+            MmsConfirmedService::RelinquishControl => "relinquish_control",
+            MmsConfirmedService::InitiateDownloadSequence => "initiate_download_sequence",
+            MmsConfirmedService::DownloadSegment => "download_segment",
+            MmsConfirmedService::TerminateDownloadSequence => "terminate_download_sequence",
+            MmsConfirmedService::InitiateUploadSequence => "initiate_upload_sequence",
+            MmsConfirmedService::UploadSegment => "upload_segment",
+            MmsConfirmedService::TerminateUploadSequence => "terminate_upload_sequence",
+            MmsConfirmedService::RequestDomainDownload => "request_domain_download",
+            MmsConfirmedService::RequestDomainUpload => "request_domain_upload",
+            MmsConfirmedService::LoadDomainContent => "load_domain_content",
+            MmsConfirmedService::StoreDomainContent => "store_domain_content",
+            MmsConfirmedService::DeleteDomain => "delete_domain",
+            MmsConfirmedService::GetDomainAttributes => "get_domain_attributes",
+            MmsConfirmedService::CreateProgramInvocation => "create_program_invocation",
+            MmsConfirmedService::DeleteProgramInvocation => "delete_program_invocation",
+            MmsConfirmedService::Start => "start",
+            MmsConfirmedService::Stop => "stop",
+            MmsConfirmedService::Resume => "resume",
+            MmsConfirmedService::Reset => "reset",
+            MmsConfirmedService::Kill => "kill",
+            MmsConfirmedService::GetProgramInvocationAttributes => {
+                "get_program_invocation_attributes"
+            }
+            MmsConfirmedService::GetAlarmSummary => "get_alarm_summary",
             MmsConfirmedService::ObtainFile => "obtain_file",
             MmsConfirmedService::FileOpen => "file_open",
             MmsConfirmedService::FileRead => "file_read",
@@ -132,12 +210,12 @@ pub enum MmsUnconfirmedService {
 }
 
 impl MmsUnconfirmedService {
-    pub fn from_tag(tag: u8) -> Self {
+    pub fn from_tag(tag: u32) -> Self {
         match tag {
             0 => MmsUnconfirmedService::InformationReport,
             1 => MmsUnconfirmedService::UnsolicitedStatus,
             2 => MmsUnconfirmedService::EventNotification,
-            _ => MmsUnconfirmedService::Unknown(tag),
+            _ => MmsUnconfirmedService::Unknown(tag as u8),
         }
     }
 
@@ -272,28 +350,41 @@ impl MmsPdu {
 
 /// Parse a BER TLV (Tag-Length-Value) header.
 /// Returns (tag_byte, is_constructed, tag_number, content, remaining).
-fn parse_ber_tlv(input: &[u8]) -> Result<(u8, bool, u8, &[u8], &[u8]), ()> {
+/// tag_number is u32 to support multi-byte tags (tag >= 31).
+fn parse_ber_tlv(input: &[u8]) -> Result<(u8, bool, u32, &[u8], &[u8]), ()> {
     if input.is_empty() {
         return Err(());
     }
 
     let tag_byte = input[0];
-    let _is_constructed = (tag_byte & 0x20) != 0;
-    let tag_number = tag_byte & 0x1F;
-    let class = (tag_byte >> 6) & 0x03;
+    let is_constructed = (tag_byte & 0x20) != 0;
+    let low5 = tag_byte & 0x1F;
 
-    // For context-specific implicit tags, the tag number is in the low 5 bits
-    // For tags >= 31, multi-byte tag encoding is used, but MMS doesn't use them
-    // at the top level
-    let actual_tag = if class == 2 {
-        // Context-specific
-        tag_number
+    let (actual_tag, tag_header_len) = if low5 == 0x1F {
+        // Multi-byte tag: subsequent bytes use base-128 with high bit as continuation
+        let mut tag_val: u32 = 0;
+        let mut idx = 1;
+        loop {
+            if idx >= input.len() {
+                return Err(());
+            }
+            let b = input[idx];
+            tag_val = (tag_val << 7) | ((b & 0x7F) as u32);
+            idx += 1;
+            if (b & 0x80) == 0 {
+                break;
+            }
+            if idx > 5 {
+                return Err(());
+            }
+        }
+        (tag_val, idx)
     } else {
-        tag_number
+        (low5 as u32, 1)
     };
 
-    let (length, header_len) = parse_ber_length(&input[1..])?;
-    let total_header = 1 + header_len;
+    let (length, header_len) = parse_ber_length(&input[tag_header_len..])?;
+    let total_header = tag_header_len + header_len;
 
     if input.len() < total_header + length {
         return Err(());
@@ -302,7 +393,7 @@ fn parse_ber_tlv(input: &[u8]) -> Result<(u8, bool, u8, &[u8], &[u8]), ()> {
     let content = &input[total_header..total_header + length];
     let remaining = &input[total_header + length..];
 
-    Ok((tag_byte, _is_constructed, actual_tag, content, remaining))
+    Ok((tag_byte, is_constructed, actual_tag, content, remaining))
 }
 
 /// Parse BER length encoding.
@@ -639,9 +730,13 @@ fn parse_confirmed_response(content: &[u8]) -> Result<MmsPdu, ()> {
     let (_, _, _, id_content, rest) = parse_ber_tlv(content)?;
     let invoke_id = parse_ber_integer(id_content)?;
 
-    // confirmedServiceResponse
-    let (_, _, service_num, _, _) = parse_ber_tlv(rest)?;
-    let service = MmsConfirmedService::from_response_tag(service_num);
+    // confirmedServiceResponse - may be absent in minimal responses
+    let service = if rest.is_empty() {
+        MmsConfirmedService::Unknown(0)
+    } else {
+        let (_, _, service_num, _, _) = parse_ber_tlv(rest)?;
+        MmsConfirmedService::from_response_tag(service_num)
+    };
 
     Ok(MmsPdu::ConfirmedResponse { invoke_id, service })
 }
@@ -654,6 +749,103 @@ fn parse_unconfirmed_pdu(content: &[u8]) -> Result<MmsPdu, ()> {
     let (_, _, tag_num, _, _) = parse_ber_tlv(content)?;
     let service = MmsUnconfirmedService::from_tag(tag_num);
     Ok(MmsPdu::UnconfirmedPdu { service })
+}
+
+/// Check if payload starts with a direct MMS PDU tag (context-specific constructed, tags 0-13).
+/// MMS PDU tags range from 0xA0 (tag 0) to 0xAD (tag 13).
+pub fn is_direct_mms_pdu(payload: &[u8]) -> bool {
+    if payload.is_empty() {
+        return false;
+    }
+    let b = payload[0];
+    (0xA0..=0xAD).contains(&b)
+}
+
+/// Extract MMS PDU from OSI Session/Presentation layer encapsulation.
+///
+/// Returns:
+/// - `Ok(Some(mms_payload))` if successfully stripped Session/Presentation layers
+/// - `Ok(None)` if this is a Session CONNECT/ACCEPT (Initiate phase)
+/// - `Err(())` if parsing failed
+pub fn extract_mms_from_session(payload: &[u8]) -> Result<Option<&[u8]>, ()> {
+    if payload.len() < 2 {
+        return Err(());
+    }
+
+    let spdu_type = payload[0];
+
+    match spdu_type {
+        // Session CONNECT (0x0D) or ACCEPT (0x0E)
+        0x0D | 0x0E => Ok(None),
+
+        // Give Tokens + Data Transfer pattern: 01 00 01 00 ...
+        0x01 => {
+            // Give Tokens SPDU: type=0x01, length=0x00 → 2 bytes
+            if payload.len() < 4 {
+                return Err(());
+            }
+            if payload[1] != 0x00 {
+                return Err(());
+            }
+            // Data Transfer SPDU: type=0x01, length=0x00 → 2 bytes
+            if payload[2] != 0x01 || payload[3] != 0x00 {
+                return Err(());
+            }
+            // Remaining is Presentation layer data
+            let pres_data = &payload[4..];
+            extract_mms_from_presentation(pres_data)
+        }
+
+        _ => Err(()),
+    }
+}
+
+/// Extract MMS PDU from Presentation layer fully-encoded-data.
+/// Looks for tag 0x61 (fully-encoded-data), then traverses PDV-list
+/// to find context-id=3 (MMS context) and extract the single-ASN1-type content.
+fn extract_mms_from_presentation(data: &[u8]) -> Result<Option<&[u8]>, ()> {
+    if data.is_empty() {
+        return Err(());
+    }
+
+    // Expect fully-encoded-data [APPLICATION 1] = tag 0x61
+    let (tag_byte, _, _, fed_content, _) = parse_ber_tlv(data)?;
+    if tag_byte != 0x61 {
+        return Err(());
+    }
+
+    // PDV-list: iterate over SEQUENCE entries
+    let mut pos = fed_content;
+    while !pos.is_empty() {
+        // Each PDV-list entry is a SEQUENCE (0x30)
+        let (entry_tag, _, _, entry_content, rem) = parse_ber_tlv(pos)?;
+        if entry_tag != 0x30 {
+            pos = rem;
+            continue;
+        }
+
+        // Inside SEQUENCE: first element is transfer-syntax-name or presentation-context-identifier
+        // presentation-context-identifier is INTEGER (tag 0x02)
+        if let Ok((id_tag, _, _, id_content, entry_rem)) = parse_ber_tlv(entry_content) {
+            if id_tag == 0x02 {
+                let ctx_id = parse_ber_integer(id_content).unwrap_or(0);
+                if ctx_id == 3 || ctx_id == 1 {
+                    // Found MMS context (typically context-id=3, sometimes 1)
+                    // Next element should be single-ASN1-type [0] IMPLICIT
+                    if let Ok((wrapper_tag, _, _, mms_data, _)) = parse_ber_tlv(entry_rem) {
+                        if wrapper_tag == 0xA0 {
+                            // This is the MMS PDU
+                            return Ok(Some(mms_data));
+                        }
+                    }
+                }
+            }
+        }
+
+        pos = rem;
+    }
+
+    Err(())
 }
 
 #[cfg(test)]

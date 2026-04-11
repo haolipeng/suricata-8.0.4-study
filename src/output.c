@@ -1253,6 +1253,10 @@ void OutputRegisterLoggers(void)
     OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonIec104Log", "eve-log.iec104",
             OutputJsonLogInitSub, ALPROTO_IEC104, JsonGenericDirPacketLogger,
             JsonLogThreadInit, JsonLogThreadDeinit);
+    /* IEC 61850 MMS JSON logger */
+    OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonIec61850MmsLog", "eve-log.iec61850_mms",
+            OutputJsonLogInitSub, ALPROTO_IEC61850_MMS, JsonGenericDirPacketLogger,
+            JsonLogThreadInit, JsonLogThreadDeinit);
 
     for (size_t i = 0; i < preregistered_loggers_nb; i++) {
         OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", preregistered_loggers[i].logname,
