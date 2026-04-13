@@ -31,11 +31,13 @@ use suricata_sys::sys::{
     SCDetectSignatureSetAppProto, Signature,
 };
 
+// Sticky buffer ID，由检测引擎分配，用于在规则中引用对应的内容缓冲区
 static mut G_IEC61850_MMS_SERVICE_BUFFER_ID: c_int = 0;
 static mut G_IEC61850_MMS_PDU_TYPE_BUFFER_ID: c_int = 0;
 
 // --- iec61850_mms.service keyword ---
 
+/// 规则中使用该关键字时的 setup 回调：绑定协议和激活对应 buffer
 unsafe extern "C" fn iec61850_mms_service_setup(
     de: *mut DetectEngineCtx, s: *mut Signature, _raw: *const std::os::raw::c_char,
 ) -> c_int {
@@ -48,7 +50,8 @@ unsafe extern "C" fn iec61850_mms_service_setup(
     return 0;
 }
 
-/// Get the service name buffer for a transaction.
+/// 获取事务中的服务名称字符串，供检测引擎进行内容匹配。
+/// flags 的 Direction 位决定取请求侧还是响应侧的 PDU。
 unsafe extern "C" fn iec61850_mms_service_get(
     tx: *const c_void, flags: u8, buf: *mut *const u8, len: *mut u32,
 ) -> bool {
@@ -70,6 +73,7 @@ unsafe extern "C" fn iec61850_mms_service_get(
 
 // --- iec61850_mms.pdu_type keyword ---
 
+/// pdu_type 关键字的 setup 回调
 unsafe extern "C" fn iec61850_mms_pdu_type_setup(
     de: *mut DetectEngineCtx, s: *mut Signature, _raw: *const std::os::raw::c_char,
 ) -> c_int {
@@ -82,7 +86,7 @@ unsafe extern "C" fn iec61850_mms_pdu_type_setup(
     return 0;
 }
 
-/// Get the PDU type buffer for a transaction.
+/// 获取事务中的 PDU 类型字符串，供检测引擎进行内容匹配
 unsafe extern "C" fn iec61850_mms_pdu_type_get(
     tx: *const c_void, flags: u8, buf: *mut *const u8, len: *mut u32,
 ) -> bool {
@@ -101,6 +105,9 @@ unsafe extern "C" fn iec61850_mms_pdu_type_get(
     return false;
 }
 
+/// 向 Suricata 检测引擎注册两个 sticky buffer 关键字：
+/// - iec61850_mms.service：匹配 MMS 服务名称（如 "read"、"write"）
+/// - iec61850_mms.pdu_type：匹配 PDU 类型（如 "confirmed_request"）
 #[no_mangle]
 pub unsafe extern "C" fn SCDetectIec61850MmsRegister() {
     // Register iec61850_mms.service sticky buffer

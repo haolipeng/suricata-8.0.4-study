@@ -22,6 +22,8 @@ use super::mms_pdu::MmsPdu;
 use crate::jsonbuilder::{JsonBuilder, JsonError};
 use std;
 
+/// 将单个 MMS PDU 写入 JSON：pdu_type、invoke_id、service，
+/// 以及 Read/Write 的 variables 数组和 GetNameList 的 object_class/domain。
 fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
     js.set_string("pdu_type", pdu.pdu_type_str())?;
 
@@ -80,6 +82,7 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
     Ok(())
 }
 
+/// 输出一个事务的完整 EVE JSON 日志：iec61850_mms { request: {...}, response: {...} }
 fn log_iec61850_mms(tx: &MmsTransaction, js: &mut JsonBuilder) -> Result<(), JsonError> {
     js.open_object("iec61850_mms")?;
 
@@ -99,6 +102,7 @@ fn log_iec61850_mms(tx: &MmsTransaction, js: &mut JsonBuilder) -> Result<(), Jso
     Ok(())
 }
 
+/// C 回调入口：Suricata 日志框架调用此函数输出事务的 JSON 日志
 #[no_mangle]
 pub unsafe extern "C" fn SCIec61850MmsLoggerLog(
     tx: *const std::os::raw::c_void, js: *mut std::os::raw::c_void,

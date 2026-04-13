@@ -87,9 +87,10 @@ pub enum MmsConfirmedService {
 }
 
 impl MmsConfirmedService {
-    /// Parse the confirmed service tag (context-specific tag within Confirmed-RequestPDU).
+    /// 根据 ConfirmedServiceRequest CHOICE 的上下文标签号解析服务类型。
+    /// 标签号对应 ISO 9506-2 ASN.1 定义中的 CHOICE 编号。
     pub fn from_request_tag(tag: u32) -> Self {
-        // Tags for ConfirmedServiceRequest CHOICE
+        // ConfirmedServiceRequest CHOICE 标签 → 服务类型
         match tag {
             0 => MmsConfirmedService::Status,
             1 => MmsConfirmedService::GetNameList,
@@ -210,11 +211,12 @@ pub enum MmsUnconfirmedService {
 }
 
 impl MmsUnconfirmedService {
+    /// UnconfirmedService CHOICE 标签 → 服务类型
     pub fn from_tag(tag: u32) -> Self {
         match tag {
-            0 => MmsUnconfirmedService::InformationReport,
-            1 => MmsUnconfirmedService::UnsolicitedStatus,
-            2 => MmsUnconfirmedService::EventNotification,
+            0 => MmsUnconfirmedService::InformationReport, // [0] 信息报告
+            1 => MmsUnconfirmedService::UnsolicitedStatus,  // [1] 主动状态上报
+            2 => MmsUnconfirmedService::EventNotification,  // [2] 事件通知
             _ => MmsUnconfirmedService::Unknown(tag as u8),
         }
     }
@@ -254,56 +256,56 @@ enum VariableSpecification {
 /// Additional details extracted from certain service requests/responses.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MmsReadRequest {
-    pub variable_specs: Vec<DomainSpecific>,
+    pub variable_specs: Vec<DomainSpecific>, // Read 请求中引用的变量列表（domain.item）
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MmsWriteRequest {
-    pub variable_specs: Vec<DomainSpecific>,
+    pub variable_specs: Vec<DomainSpecific>, // Write 请求中引用的变量列表
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MmsGetNameListRequest {
-    pub object_class: Option<String>,
-    pub domain_id: Option<String>,
+    pub object_class: Option<String>, // 查询的对象类别（如 named_variable、domain 等）
+    pub domain_id: Option<String>,    // 限定查询范围的域名称
 }
 
-/// Top-level MMS PDU types.
+/// 顶层 MMS PDU 类型，对应 ASN.1 CHOICE 标签 [0]-[13]
 #[derive(Debug, Clone, PartialEq)]
 pub enum MmsPdu {
-    InitiateRequest,
-    InitiateResponse,
-    InitiateError,
-    ConfirmedRequest {
+    InitiateRequest,                          // [8]
+    InitiateResponse,                         // [9]
+    InitiateError,                            // [10]
+    ConfirmedRequest {                        // [0]
         invoke_id: u32,
         service: MmsConfirmedService,
         read_info: Option<MmsReadRequest>,
         write_info: Option<MmsWriteRequest>,
         get_name_list_info: Option<MmsGetNameListRequest>,
     },
-    ConfirmedResponse {
+    ConfirmedResponse {                       // [1]
         invoke_id: u32,
         service: MmsConfirmedService,
     },
-    ConfirmedError {
+    ConfirmedError {                          // [2]
         invoke_id: u32,
     },
-    UnconfirmedPdu {
+    UnconfirmedPdu {                          // [3]
         service: MmsUnconfirmedService,
     },
-    RejectPdu {
+    RejectPdu {                               // [4]
         invoke_id: Option<u32>,
     },
-    CancelRequest {
+    CancelRequest {                           // [5]
         invoke_id: u32,
     },
-    CancelResponse {
+    CancelResponse {                          // [6]
         invoke_id: u32,
     },
-    CancelError,
-    ConcludeRequest,
-    ConcludeResponse,
-    ConcludeError,
+    CancelError,                              // [7]
+    ConcludeRequest,                          // [11]
+    ConcludeResponse,                         // [12]
+    ConcludeError,                            // [13]
 }
 
 impl MmsPdu {
@@ -357,11 +359,11 @@ fn parse_ber_tlv(input: &[u8]) -> Result<(u8, bool, u32, &[u8], &[u8]), ()> {
     }
 
     let tag_byte = input[0];
-    let is_constructed = (tag_byte & 0x20) != 0;
-    let low5 = tag_byte & 0x1F;
+    let is_constructed = (tag_byte & 0x20) != 0; // bit 5 = constructed 标志
+    let low5 = tag_byte & 0x1F; // 低 5 位：若全 1 则为多字节标签
 
     let (actual_tag, tag_header_len) = if low5 == 0x1F {
-        // Multi-byte tag: subsequent bytes use base-128 with high bit as continuation
+        // 多字节标签：后续字节使用 base-128 编码，最高位为延续标志
         let mut tag_val: u32 = 0;
         let mut idx = 1;
         loop {
@@ -396,8 +398,8 @@ fn parse_ber_tlv(input: &[u8]) -> Result<(u8, bool, u32, &[u8], &[u8]), ()> {
     Ok((tag_byte, is_constructed, actual_tag, content, remaining))
 }
 
-/// Parse BER length encoding.
-/// Returns (length_value, bytes_consumed).
+/// 解析 BER 长度编码。
+/// 返回 (长度值, 消耗的字节数)。
 fn parse_ber_length(input: &[u8]) -> Result<(usize, usize), ()> {
     if input.is_empty() {
         return Err(());
@@ -405,13 +407,13 @@ fn parse_ber_length(input: &[u8]) -> Result<(usize, usize), ()> {
 
     let first = input[0];
     if first < 0x80 {
-        // Short form
+        // 短格式：单字节直接表示长度 (0-127)
         Ok((first as usize, 1))
     } else if first == 0x80 {
-        // Indefinite form - not supported for simplicity
+        // 不定长格式，本实现不支持
         Err(())
     } else {
-        // Long form
+        // 长格式：低 7 位 = 后续长度字节数，再按大端拼接
         let num_bytes = (first & 0x7F) as usize;
         if num_bytes > 4 || input.len() < 1 + num_bytes {
             return Err(());
@@ -524,7 +526,7 @@ fn parse_get_name_list_request(content: &[u8]) -> MmsGetNameListRequest {
             match tag_byte {
                 0xA0 => {
                     // objectClass: CHOICE { ... }
-                    // Usually [0] INTEGER for basic class
+                    // objectClass: 整数值映射为 MMS 对象类别名称
                     if let Ok((_, _, _, class_content, _)) = parse_ber_tlv(inner) {
                         if let Ok(class_val) = parse_ber_integer(class_content) {
                             result.object_class = Some(
@@ -647,11 +649,11 @@ fn parse_first_integer(content: &[u8]) -> Result<u32, ()> {
 ///   confirmedServiceRequest  ConfirmedServiceRequest
 /// }
 fn parse_confirmed_request(content: &[u8]) -> Result<MmsPdu, ()> {
-    // First element: invokeID (INTEGER)
+    // 第一个元素：invokeID（INTEGER），用于请求/响应配对
     let (_, _, _, id_content, rest) = parse_ber_tlv(content)?;
     let invoke_id = parse_ber_integer(id_content)?;
 
-    // Second element: confirmedServiceRequest (CHOICE with context tags)
+    // 第二个元素：confirmedServiceRequest（CHOICE），按上下文标签分发到具体服务
     let (service_tag, _, service_num, service_content, _) = parse_ber_tlv(rest)?;
     let _ = service_tag;
     let service = MmsConfirmedService::from_request_tag(service_num);
@@ -751,8 +753,8 @@ fn parse_unconfirmed_pdu(content: &[u8]) -> Result<MmsPdu, ()> {
     Ok(MmsPdu::UnconfirmedPdu { service })
 }
 
-/// Check if payload starts with a direct MMS PDU tag (context-specific constructed, tags 0-13).
-/// MMS PDU tags range from 0xA0 (tag 0) to 0xAD (tag 13).
+/// 判断载荷是否直接以 MMS PDU 标签开头（无 Session/Presentation 封装）。
+/// MMS PDU 的上下文标签范围：0xA0（[0]）到 0xAD（[13]）。
 pub fn is_direct_mms_pdu(payload: &[u8]) -> bool {
     if payload.is_empty() {
         return false;
@@ -775,10 +777,10 @@ pub fn extract_mms_from_session(payload: &[u8]) -> Result<Option<&[u8]>, ()> {
     let spdu_type = payload[0];
 
     match spdu_type {
-        // Session CONNECT (0x0D) or ACCEPT (0x0E)
+        // Session CONNECT (0x0D) 或 ACCEPT (0x0E)：属于 MMS 初始化阶段
         0x0D | 0x0E => Ok(None),
 
-        // Give Tokens + Data Transfer pattern: 01 00 01 00 ...
+        // Give Tokens (01 00) + Data Transfer (01 00) 模式：跳过 4 字节后进入 Presentation 层
         0x01 => {
             // Give Tokens SPDU: type=0x01, length=0x00 → 2 bytes
             if payload.len() < 4 {
@@ -800,21 +802,21 @@ pub fn extract_mms_from_session(payload: &[u8]) -> Result<Option<&[u8]>, ()> {
     }
 }
 
-/// Extract MMS PDU from Presentation layer fully-encoded-data.
-/// Looks for tag 0x61 (fully-encoded-data), then traverses PDV-list
-/// to find context-id=3 (MMS context) and extract the single-ASN1-type content.
+/// 从 Presentation 层 fully-encoded-data 中提取 MMS PDU。
+/// 遍历 PDV-list，查找 presentation-context-id=3 或 1（MMS 上下文）的条目，
+/// 从其 single-ASN1-type [0] 包装中提取实际 MMS 数据。
 fn extract_mms_from_presentation(data: &[u8]) -> Result<Option<&[u8]>, ()> {
     if data.is_empty() {
         return Err(());
     }
 
-    // Expect fully-encoded-data [APPLICATION 1] = tag 0x61
+    // 期望 fully-encoded-data [APPLICATION 1] = 标签 0x61
     let (tag_byte, _, _, fed_content, _) = parse_ber_tlv(data)?;
     if tag_byte != 0x61 {
         return Err(());
     }
 
-    // PDV-list: iterate over SEQUENCE entries
+    // 遍历 PDV-list 条目（每个是 SEQUENCE 0x30）
     let mut pos = fed_content;
     while !pos.is_empty() {
         // Each PDV-list entry is a SEQUENCE (0x30)
@@ -824,14 +826,13 @@ fn extract_mms_from_presentation(data: &[u8]) -> Result<Option<&[u8]>, ()> {
             continue;
         }
 
-        // Inside SEQUENCE: first element is transfer-syntax-name or presentation-context-identifier
-        // presentation-context-identifier is INTEGER (tag 0x02)
+        // 每个 PDV-list 条目内：先读 presentation-context-identifier (INTEGER 0x02)
         if let Ok((id_tag, _, _, id_content, entry_rem)) = parse_ber_tlv(entry_content) {
             if id_tag == 0x02 {
                 let ctx_id = parse_ber_integer(id_content).unwrap_or(0);
                 if ctx_id == 3 || ctx_id == 1 {
-                    // Found MMS context (typically context-id=3, sometimes 1)
-                    // Next element should be single-ASN1-type [0] IMPLICIT
+                    // 匹配到 MMS 上下文（通常 id=3，部分实现用 id=1）
+                    // 下一个元素是 single-ASN1-type [0] IMPLICIT 包装
                     if let Ok((wrapper_tag, _, _, mms_data, _)) = parse_ber_tlv(entry_rem) {
                         if wrapper_tag == 0xA0 {
                             // This is the MMS PDU

@@ -37,24 +37,19 @@ pub struct TpktHeader {
     pub length: u16,
 }
 
-/// COTP PDU types
+/// COTP PDU 类型（ISO 8073）
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum CotpPduType {
-    /// Connection Request (0xE0)
-    ConnectionRequest,
-    /// Connection Confirm (0xD0)
-    ConnectionConfirm,
-    /// Disconnect Request (0x80)
-    DisconnectRequest,
-    /// Data Transfer (0xF0)
-    DataTransfer,
-    /// Unknown COTP type
+    ConnectionRequest,  // CR (0xE0)
+    ConnectionConfirm,  // CC (0xD0)
+    DisconnectRequest,  // DR (0x80)
+    DataTransfer,       // DT (0xF0)
     Unknown(u8),
 }
 
 impl CotpPduType {
     fn from_byte(b: u8) -> Self {
-        // High nibble determines the type
+        // PDU 类型由字节高 4 位决定（低 4 位含 CDT 信用值等）
         match b & 0xF0 {
             0xE0 => CotpPduType::ConnectionRequest,
             0xD0 => CotpPduType::ConnectionConfirm,
@@ -69,8 +64,8 @@ impl CotpPduType {
 pub struct CotpHeader {
     pub length: u8,
     pub pdu_type: CotpPduType,
-    pub tpdu_nr: u8,
-    pub last_unit: bool,
+    pub tpdu_nr: u8,     // TPDU 序号（仅 DT 帧有效）
+    pub last_unit: bool,  // EOT 标志，true 表示本 TPDU 是 TSDU 的最后一个分片
 }
 
 /// Parsed result of one TPKT/COTP frame
@@ -99,10 +94,10 @@ pub fn parse_cotp_header(i: &[u8]) -> IResult<&[u8], CotpHeader> {
 
     match pdu_type {
         CotpPduType::DataTransfer => {
-            // DT TPDU: length=2, pdu_type=0xF0, tpdu_nr+eot
+            // DT 帧格式：length(1) + type(1) + nr_and_eot(1)，之后是数据载荷
             let (i, nr_and_eot) = nom7::number::streaming::u8(i)?;
-            let last_unit = (nr_and_eot & 0x80) != 0;
-            let tpdu_nr = nr_and_eot & 0x7F;
+            let last_unit = (nr_and_eot & 0x80) != 0; // 最高位 = EOT
+            let tpdu_nr = nr_and_eot & 0x7F;          // 低 7 位 = 序号
             // Skip any remaining COTP header bytes (length includes pdu_type byte)
             let remaining_header = if length > 2 { length - 2 } else { 0 };
             let (i, _) = take(remaining_header as usize)(i)?;
@@ -117,8 +112,7 @@ pub fn parse_cotp_header(i: &[u8]) -> IResult<&[u8], CotpHeader> {
             ))
         }
         _ => {
-            // For CR/CC/DR, skip the rest of the COTP header
-            // length field is the length of the header after the length byte itself
+            // CR/CC/DR 帧：length 字段后的字节全属于 COTP 头部参数，直接跳过
             let remaining = if length > 1 { length - 1 } else { 0 };
             let (i, _) = take(remaining as usize)(i)?;
             Ok((
@@ -154,10 +148,10 @@ pub fn parse_tpkt_cotp_frame(i: &[u8]) -> IResult<&[u8], TpktCotpFrame<'_>> {
         )));
     }
 
-    // The payload length is total TPKT length minus the 4-byte TPKT header
+    // TPKT 长度包含自身 4 字节头，载荷长度 = total - 4
     let payload_len = tpkt.length as usize - TPKT_HEADER_LEN;
 
-    // Take exactly the TPKT payload
+    // 精确提取 TPKT 载荷，剩余字节留给下一帧
     let (remaining, tpkt_payload) = take(payload_len)(i)?;
 
     // Parse COTP from the TPKT payload

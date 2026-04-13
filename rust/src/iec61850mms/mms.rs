@@ -34,45 +34,49 @@ use suricata_sys::sys::{
     SCAppLayerProtoDetectConfProtoDetectionEnabled,
 };
 
+// 单个流中允许的最大事务数，超过时触发 TooManyTransactions 事件
 static mut IEC61850_MMS_MAX_TX: usize = 256;
 
 pub(super) static mut ALPROTO_IEC61850_MMS: AppProto = ALPROTO_UNKNOWN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+/// MMS 连接状态机的状态
 pub enum MmsConnState {
     #[default]
-    Idle,
-    CotpPending,
-    CotpEstablished,
-    InitPending,
-    MmsAssociated,
-    Concluding,
-    Closed,
+    Idle,             // 初始状态，尚未建立任何连接
+    CotpPending,      // 已发送 COTP CR，等待 CC 确认
+    CotpEstablished,  // COTP 连接已建立，可发起 MMS 初始化
+    InitPending,      // 已发送 MMS Initiate-Request，等待 Response
+    MmsAssociated,    // MMS 会话已建立，可收发数据 PDU
+    Concluding,       // 已发送 Conclude-Request，等待 Response
+    Closed,           // 连接已关闭（Conclude 完成或 COTP DR）
 }
 
+/// 驱动状态机转换的事件
 enum MmsConnEvent {
-    CotpCr,
-    CotpCc,
-    CotpDr,
-    MmsInitReq,
-    MmsInitResp,
-    MmsData,
-    MmsConcludeReq,
-    MmsConcludeResp,
+    CotpCr,          // 收到 COTP Connection Request
+    CotpCc,          // 收到 COTP Connection Confirm
+    CotpDr,          // 收到 COTP Disconnect Request（任何状态均可转 Closed）
+    MmsInitReq,      // 收到 MMS Initiate-Request
+    MmsInitResp,     // 收到 MMS Initiate-Response
+    MmsData,         // 收到普通数据 PDU（Confirmed/Unconfirmed 等）
+    MmsConcludeReq,  // 收到 MMS Conclude-Request
+    MmsConcludeResp, // 收到 MMS Conclude-Response
 }
 
 #[derive(AppLayerEvent)]
+/// 应用层事件，用于 Suricata 规则中的 app-layer-event 匹配
 enum Iec61850MmsEvent {
-    TooManyTransactions,
-    MalformedData,
-    ProtocolStateViolation,
+    TooManyTransactions,    // 事务数超过 IEC61850_MMS_MAX_TX 上限
+    MalformedData,          // BER 解码或帧解析失败
+    ProtocolStateViolation, // 状态机检测到非法的协议状态转换
 }
 
 pub struct MmsTransaction {
     tx_id: u64,
     pub request: Option<MmsPdu>,
     pub response: Option<MmsPdu>,
-    pub invoke_id: Option<u32>,
+    pub invoke_id: Option<u32>, // Confirmed 类 PDU 的 invokeID，用于请求/响应匹配
 
     tx_data: AppLayerTxData,
 }
@@ -106,9 +110,9 @@ pub struct MmsState {
     state_data: AppLayerStateData,
     tx_id: u64,
     transactions: VecDeque<MmsTransaction>,
-    request_gap: bool,
-    response_gap: bool,
-    conn_state: MmsConnState,
+    request_gap: bool,  // 请求方向发生过 TCP gap，需等待下一个 TPKT 头重新同步
+    response_gap: bool, // 响应方向发生过 TCP gap
+    conn_state: MmsConnState, // 当前连接状态机的状态
 }
 
 impl State<MmsTransaction> for MmsState {
@@ -126,16 +130,21 @@ impl MmsState {
         Default::default()
     }
 
+    /// 状态机转换：根据当前状态和事件决定下一状态。
+    /// 返回 true 表示合法转换，false 表示协议违规（状态不变）。
     fn advance_state(&mut self, event: MmsConnEvent) -> bool {
         let next = match (&self.conn_state, &event) {
             (MmsConnState::Idle, MmsConnEvent::CotpCr) => MmsConnState::CotpPending,
             (MmsConnState::CotpPending, MmsConnEvent::CotpCc) => MmsConnState::CotpEstablished,
             (MmsConnState::CotpEstablished, MmsConnEvent::MmsInitReq) => MmsConnState::InitPending,
+            // 兼容直接 MMS 格式（无 COTP 握手阶段）
             (MmsConnState::Idle, MmsConnEvent::MmsInitReq) => MmsConnState::InitPending,
             (MmsConnState::InitPending, MmsConnEvent::MmsInitResp) => MmsConnState::MmsAssociated,
+            // MmsAssociated 状态下可反复收发数据 PDU
             (MmsConnState::MmsAssociated, MmsConnEvent::MmsData) => MmsConnState::MmsAssociated,
             (MmsConnState::MmsAssociated, MmsConnEvent::MmsConcludeReq) => MmsConnState::Concluding,
             (MmsConnState::Concluding, MmsConnEvent::MmsConcludeResp) => MmsConnState::Closed,
+            // COTP 断连在任何状态下都直接转为 Closed
             (_, MmsConnEvent::CotpDr) => MmsConnState::Closed,
             _ => {
                 return false;
@@ -179,6 +188,8 @@ impl MmsState {
             .find(|tx| tx.response.is_none())
     }
 
+    /// 处理解析出的 MMS PDU：请求创建新事务，响应匹配已有事务。
+    /// 响应匹配策略：先按 invoke_id 精确匹配，回退到第一个未响应的事务。
     fn handle_mms_pdu(&mut self, pdu: MmsPdu, is_request: bool) {
         if is_request {
             let mut tx = self.new_tx();
@@ -192,7 +203,7 @@ impl MmsState {
         } else {
             let invoke_id = pdu.invoke_id();
 
-            // Find the index of a matching transaction to avoid borrow issues
+            // 按 invoke_id 查找匹配的请求事务
             let match_idx = if let Some(id) = invoke_id {
                 self.transactions
                     .iter()
@@ -201,6 +212,7 @@ impl MmsState {
                 None
             };
 
+            // 回退：取第一个尚无响应的事务
             let target_idx = match_idx.or_else(|| {
                 self.transactions
                     .iter()
@@ -211,7 +223,7 @@ impl MmsState {
                 self.transactions[idx].tx_data.updated_tc = true;
                 self.transactions[idx].response = Some(pdu);
             } else {
-                // No matching request; create a standalone tx
+                // 无匹配请求，创建仅含响应的独立事务
                 let mut tx = self.new_tx();
                 tx.invoke_id = invoke_id;
                 tx.tx_data.updated_tc = true;
@@ -221,11 +233,16 @@ impl MmsState {
         }
     }
 
+    /// 解析 TPKT/COTP 帧流。处理三个阶段：
+    /// 1. 循环提取 TPKT 帧并按 COTP 类型分发
+    /// 2. 对 DataTransfer 帧：判断是直接 MMS 还是需剥离 Session/Presentation 层
+    /// 3. 解析 MMS PDU，驱动状态机，检测协议违规
     fn parse_frames(&mut self, input: &[u8], is_request: bool) -> AppLayerResult {
         if input.is_empty() {
             return AppLayerResult::ok();
         }
 
+        // gap 恢复：丢包后等待下一个合法 TPKT 头再恢复解析
         if is_request && self.request_gap {
             if !parser::probe_tpkt(input) {
                 return AppLayerResult::ok();
@@ -245,6 +262,7 @@ impl MmsState {
                     if frame.cotp.pdu_type == parser::CotpPduType::DataTransfer
                         && !frame.payload.is_empty()
                     {
+                        // 判断 COTP 载荷格式：直接 MMS 标签 vs Session/Presentation 封装
                         let mms_data = if mms_pdu::is_direct_mms_pdu(frame.payload) {
                             // Direct MMS PDU (mms-* pcap format)
                             Some(frame.payload)
@@ -313,6 +331,7 @@ impl MmsState {
                                 }
                             }
                         }
+                    // 非 DataTransfer 帧：处理 COTP 连接管理
                     } else {
                         match frame.cotp.pdu_type {
                             parser::CotpPduType::ConnectionRequest => {
