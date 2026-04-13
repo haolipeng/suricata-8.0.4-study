@@ -38,10 +38,34 @@ static mut IEC61850_MMS_MAX_TX: usize = 256;
 
 pub(super) static mut ALPROTO_IEC61850_MMS: AppProto = ALPROTO_UNKNOWN;
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum MmsConnState {
+    #[default]
+    Idle,
+    CotpPending,
+    CotpEstablished,
+    InitPending,
+    MmsAssociated,
+    Concluding,
+    Closed,
+}
+
+enum MmsConnEvent {
+    CotpCr,
+    CotpCc,
+    CotpDr,
+    MmsInitReq,
+    MmsInitResp,
+    MmsData,
+    MmsConcludeReq,
+    MmsConcludeResp,
+}
+
 #[derive(AppLayerEvent)]
 enum Iec61850MmsEvent {
     TooManyTransactions,
     MalformedData,
+    ProtocolStateViolation,
 }
 
 pub struct MmsTransaction {
@@ -84,6 +108,7 @@ pub struct MmsState {
     transactions: VecDeque<MmsTransaction>,
     request_gap: bool,
     response_gap: bool,
+    conn_state: MmsConnState,
 }
 
 impl State<MmsTransaction> for MmsState {
@@ -99,6 +124,25 @@ impl State<MmsTransaction> for MmsState {
 impl MmsState {
     pub fn new() -> Self {
         Default::default()
+    }
+
+    fn advance_state(&mut self, event: MmsConnEvent) -> bool {
+        let next = match (&self.conn_state, &event) {
+            (MmsConnState::Idle, MmsConnEvent::CotpCr) => MmsConnState::CotpPending,
+            (MmsConnState::CotpPending, MmsConnEvent::CotpCc) => MmsConnState::CotpEstablished,
+            (MmsConnState::CotpEstablished, MmsConnEvent::MmsInitReq) => MmsConnState::InitPending,
+            (MmsConnState::Idle, MmsConnEvent::MmsInitReq) => MmsConnState::InitPending,
+            (MmsConnState::InitPending, MmsConnEvent::MmsInitResp) => MmsConnState::MmsAssociated,
+            (MmsConnState::MmsAssociated, MmsConnEvent::MmsData) => MmsConnState::MmsAssociated,
+            (MmsConnState::MmsAssociated, MmsConnEvent::MmsConcludeReq) => MmsConnState::Concluding,
+            (MmsConnState::Concluding, MmsConnEvent::MmsConcludeResp) => MmsConnState::Closed,
+            (_, MmsConnEvent::CotpDr) => MmsConnState::Closed,
+            _ => {
+                return false;
+            }
+        };
+        self.conn_state = next;
+        true
     }
 
     fn free_tx(&mut self, tx_id: u64) {
@@ -210,12 +254,25 @@ impl MmsState {
                                 Ok(Some(data)) => Some(data),
                                 Ok(None) => {
                                     // Session CONNECT/ACCEPT → create Initiate transaction
+                                    let conn_event = if is_request {
+                                        MmsConnEvent::MmsInitReq
+                                    } else {
+                                        MmsConnEvent::MmsInitResp
+                                    };
+                                    let valid = self.advance_state(conn_event);
                                     let pdu = if is_request {
                                         MmsPdu::InitiateRequest
                                     } else {
                                         MmsPdu::InitiateResponse
                                     };
                                     self.handle_mms_pdu(pdu, is_request);
+                                    if !valid {
+                                        if let Some(tx) = self.transactions.back_mut() {
+                                            tx.tx_data.set_event(
+                                                Iec61850MmsEvent::ProtocolStateViolation as u8,
+                                            );
+                                        }
+                                    }
                                     None
                                 }
                                 Err(_) => {
@@ -231,7 +288,22 @@ impl MmsState {
                         if let Some(data) = mms_data {
                             match mms_pdu::parse_mms_pdu(data) {
                                 Ok(pdu) => {
+                                    let conn_event = match &pdu {
+                                        MmsPdu::InitiateRequest => MmsConnEvent::MmsInitReq,
+                                        MmsPdu::InitiateResponse => MmsConnEvent::MmsInitResp,
+                                        MmsPdu::ConcludeRequest => MmsConnEvent::MmsConcludeReq,
+                                        MmsPdu::ConcludeResponse => MmsConnEvent::MmsConcludeResp,
+                                        _ => MmsConnEvent::MmsData,
+                                    };
+                                    let valid = self.advance_state(conn_event);
                                     self.handle_mms_pdu(pdu, is_request);
+                                    if !valid {
+                                        if let Some(tx) = self.transactions.back_mut() {
+                                            tx.tx_data.set_event(
+                                                Iec61850MmsEvent::ProtocolStateViolation as u8,
+                                            );
+                                        }
+                                    }
                                 }
                                 Err(_) => {
                                     let mut tx = self.new_tx();
@@ -243,14 +315,31 @@ impl MmsState {
                         }
                     } else {
                         match frame.cotp.pdu_type {
-                            parser::CotpPduType::ConnectionRequest
-                            | parser::CotpPduType::ConnectionConfirm => {
-                                if is_request {
-                                    let tx = self.new_tx();
-                                    self.transactions.push_back(tx);
-                                } else if let Some(tx) = self.find_open_request() {
-                                    tx.tx_data.updated_tc = true;
+                            parser::CotpPduType::ConnectionRequest => {
+                                let valid = self.advance_state(MmsConnEvent::CotpCr);
+                                let tx = self.new_tx();
+                                self.transactions.push_back(tx);
+                                if !valid {
+                                    if let Some(tx) = self.transactions.back_mut() {
+                                        tx.tx_data.set_event(
+                                            Iec61850MmsEvent::ProtocolStateViolation as u8,
+                                        );
+                                    }
                                 }
+                            }
+                            parser::CotpPduType::ConnectionConfirm => {
+                                let valid = self.advance_state(MmsConnEvent::CotpCc);
+                                if let Some(tx) = self.find_open_request() {
+                                    tx.tx_data.updated_tc = true;
+                                    if !valid {
+                                        tx.tx_data.set_event(
+                                            Iec61850MmsEvent::ProtocolStateViolation as u8,
+                                        );
+                                    }
+                                }
+                            }
+                            parser::CotpPduType::DisconnectRequest => {
+                                self.advance_state(MmsConnEvent::CotpDr);
                             }
                             _ => {}
                         }
@@ -616,5 +705,154 @@ mod tests {
             }
         );
         assert_eq!(state.tx_id, 2);
+    }
+
+    #[test]
+    fn test_conn_state_normal_flow() {
+        let mut state = MmsState::new();
+        assert_eq!(state.conn_state, MmsConnState::Idle);
+
+        // COTP CR
+        let cr_buf = [
+            0x03, 0x00, 0x00, 0x0B,
+            0x06, 0xE0, 0x00, 0x00, 0x00, 0x01, 0xC0,
+        ];
+        state.parse_request(&cr_buf);
+        assert_eq!(state.conn_state, MmsConnState::CotpPending);
+
+        // COTP CC
+        let cc_buf = [
+            0x03, 0x00, 0x00, 0x0B,
+            0x06, 0xD0, 0x00, 0x00, 0x00, 0x01, 0xC0,
+        ];
+        state.parse_response(&cc_buf);
+        assert_eq!(state.conn_state, MmsConnState::CotpEstablished);
+
+        // MMS Initiate-Request
+        let init_req = [
+            0x03, 0x00, 0x00, 0x0C,
+            0x02, 0xF0, 0x80,
+            0xA8, 0x03, 0x80, 0x01, 0x01,
+        ];
+        state.parse_request(&init_req);
+        assert_eq!(state.conn_state, MmsConnState::InitPending);
+
+        // MMS Initiate-Response
+        let init_resp = [
+            0x03, 0x00, 0x00, 0x0C,
+            0x02, 0xF0, 0x80,
+            0xA9, 0x03, 0x80, 0x01, 0x01,
+        ];
+        state.parse_response(&init_resp);
+        assert_eq!(state.conn_state, MmsConnState::MmsAssociated);
+
+        // MMS Confirmed-Request (data)
+        let data_req = [
+            0x03, 0x00, 0x00, 0x13,
+            0x02, 0xF0, 0x80,
+            0xA0, 0x0A,
+            0x02, 0x01, 0x01,
+            0xA4, 0x05, 0xA1, 0x03, 0xA0, 0x01, 0x00,
+        ];
+        state.parse_request(&data_req);
+        assert_eq!(state.conn_state, MmsConnState::MmsAssociated);
+
+        // MMS Conclude-Request
+        let conclude_req = [
+            0x03, 0x00, 0x00, 0x09,
+            0x02, 0xF0, 0x80,
+            0xAB, 0x00,
+        ];
+        state.parse_request(&conclude_req);
+        assert_eq!(state.conn_state, MmsConnState::Concluding);
+
+        // MMS Conclude-Response
+        let conclude_resp = [
+            0x03, 0x00, 0x00, 0x09,
+            0x02, 0xF0, 0x80,
+            0xAC, 0x00,
+        ];
+        state.parse_response(&conclude_resp);
+        assert_eq!(state.conn_state, MmsConnState::Closed);
+    }
+
+    #[test]
+    fn test_conn_state_data_before_association() {
+        let mut state = MmsState::new();
+        assert_eq!(state.conn_state, MmsConnState::Idle);
+
+        // MmsData in Idle state should be a violation
+        assert!(!state.advance_state(MmsConnEvent::MmsData));
+        // State should remain Idle (not changed on violation)
+        assert_eq!(state.conn_state, MmsConnState::Idle);
+
+        // Also verify via parse: send Confirmed-Request directly in Idle state
+        let data_req = [
+            0x03, 0x00, 0x00, 0x13,
+            0x02, 0xF0, 0x80,
+            0xA0, 0x0A,
+            0x02, 0x01, 0x01,
+            0xA4, 0x05, 0xA1, 0x03, 0xA0, 0x01, 0x00,
+        ];
+        state.parse_request(&data_req);
+        // State should still be Idle (violation doesn't advance state)
+        assert_eq!(state.conn_state, MmsConnState::Idle);
+    }
+
+    #[test]
+    fn test_conn_state_direct_mms_format() {
+        let mut state = MmsState::new();
+        assert_eq!(state.conn_state, MmsConnState::Idle);
+
+        // Idle + MmsInitReq should be a valid transition (direct MMS format)
+        assert!(state.advance_state(MmsConnEvent::MmsInitReq));
+        assert_eq!(state.conn_state, MmsConnState::InitPending);
+
+        // Reset and verify via parse
+        let mut state = MmsState::new();
+
+        // Direct MMS Initiate-Request (no COTP connection phase)
+        let init_req = [
+            0x03, 0x00, 0x00, 0x0C,
+            0x02, 0xF0, 0x80,
+            0xA8, 0x03, 0x80, 0x01, 0x01,
+        ];
+        state.parse_request(&init_req);
+        assert_eq!(state.conn_state, MmsConnState::InitPending);
+
+        // Initiate-Response
+        let init_resp = [
+            0x03, 0x00, 0x00, 0x0C,
+            0x02, 0xF0, 0x80,
+            0xA9, 0x03, 0x80, 0x01, 0x01,
+        ];
+        state.parse_response(&init_resp);
+        assert_eq!(state.conn_state, MmsConnState::MmsAssociated);
+    }
+
+    #[test]
+    fn test_conn_state_cotp_disconnect() {
+        let mut state = MmsState::new();
+
+        // Establish COTP connection
+        let cr_buf = [
+            0x03, 0x00, 0x00, 0x0B,
+            0x06, 0xE0, 0x00, 0x00, 0x00, 0x01, 0xC0,
+        ];
+        state.parse_request(&cr_buf);
+        let cc_buf = [
+            0x03, 0x00, 0x00, 0x0B,
+            0x06, 0xD0, 0x00, 0x00, 0x00, 0x01, 0xC0,
+        ];
+        state.parse_response(&cc_buf);
+        assert_eq!(state.conn_state, MmsConnState::CotpEstablished);
+
+        // COTP Disconnect Request (type 0x80)
+        let dr_buf = [
+            0x03, 0x00, 0x00, 0x0B,
+            0x06, 0x80, 0x00, 0x00, 0x00, 0x01, 0x00,
+        ];
+        state.parse_request(&dr_buf);
+        assert_eq!(state.conn_state, MmsConnState::Closed);
     }
 }
