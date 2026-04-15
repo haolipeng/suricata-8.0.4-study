@@ -17,7 +17,8 @@
 
 //! IEC 61850 MMS app-layer state machine.
 
-use super::mms_pdu::{self, MmsPdu};
+use super::mms_pdu::{MmsPdu, parse_mms_pdu};
+use super::session::{SessionExtractResult, is_direct_mms_pdu, extract_mms_from_session};
 use super::parser;
 use crate::applayer::*;
 use crate::conf::conf_get;
@@ -113,6 +114,8 @@ pub struct MmsState {
     request_gap: bool,  // 请求方向发生过 TCP gap，需等待下一个 TPKT 头重新同步
     response_gap: bool, // 响应方向发生过 TCP gap
     conn_state: MmsConnState, // 当前连接状态机的状态
+    ts_cotp_buf: Vec<u8>, // 请求方向的 COTP 分片重组缓冲区
+    tc_cotp_buf: Vec<u8>, // 响应方向的 COTP 分片重组缓冲区
 }
 
 impl State<MmsTransaction> for MmsState {
@@ -233,25 +236,159 @@ impl MmsState {
         }
     }
 
+    /// 状态机违规时在最近的事务上设置 ProtocolStateViolation 事件。
+    /// 用于 Session Init、MMS PDU 解析、COTP CR 三条路径。
+    /// 注意：COTP CC 路径的事件设置在 find_open_request() 上，不使用此方法。
+    fn check_state_violation(&mut self, valid: bool) {
+        if !valid {
+            if let Some(tx) = self.transactions.back_mut() {
+                tx.tx_data
+                    .set_event(Iec61850MmsEvent::ProtocolStateViolation as u8);
+            }
+        }
+    }
+
+    /// 创建仅含 MalformedData 事件的空事务。
+    fn emit_malformed_tx(&mut self) {
+        let mut tx = self.new_tx();
+        tx.tx_data
+            .set_event(Iec61850MmsEvent::MalformedData as u8);
+        self.transactions.push_back(tx);
+    }
+
+    /// COTP 分片重组：EOT=0 缓冲数据返回 None；EOT=1 返回完整载荷。
+    /// 保留 Cow::Borrowed 零拷贝优化（非分片帧不拷贝）。
+    fn reassemble_cotp<'a>(
+        &mut self, payload: &'a [u8], last_unit: bool, is_request: bool,
+    ) -> Option<std::borrow::Cow<'a, [u8]>> {
+        let cotp_buf = if is_request {
+            &mut self.ts_cotp_buf
+        } else {
+            &mut self.tc_cotp_buf
+        };
+
+        if !last_unit {
+            cotp_buf.extend_from_slice(payload);
+            return None;
+        }
+
+        let complete = if cotp_buf.is_empty() {
+            std::borrow::Cow::Borrowed(payload)
+        } else {
+            cotp_buf.extend_from_slice(payload);
+            let assembled = std::borrow::Cow::Owned(cotp_buf.clone());
+            cotp_buf.clear();
+            assembled
+        };
+        Some(complete)
+    }
+
+    /// 完整 COTP 载荷的分发处理：判断直接 MMS / Session 封装，
+    /// 解析 MMS PDU，驱动状态机，检测协议违规。
+    fn handle_cotp_payload(&mut self, payload: &[u8], is_request: bool) {
+        let mms_data = if is_direct_mms_pdu(payload) {
+            Some(payload)
+        } else {
+            match extract_mms_from_session(payload) {
+                Ok(SessionExtractResult::Mms(data)) => Some(data),
+                Ok(SessionExtractResult::Init) => {
+                    let conn_event = if is_request {
+                        MmsConnEvent::MmsInitReq
+                    } else {
+                        MmsConnEvent::MmsInitResp
+                    };
+                    let valid = self.advance_state(conn_event);
+                    let pdu = if is_request {
+                        MmsPdu::InitiateRequest
+                    } else {
+                        MmsPdu::InitiateResponse
+                    };
+                    self.handle_mms_pdu(pdu, is_request);
+                    self.check_state_violation(valid);
+                    None
+                }
+                Ok(SessionExtractResult::SessionClose) => {
+                    self.advance_state(MmsConnEvent::CotpDr);
+                    None
+                }
+                Err(_) => {
+                    self.emit_malformed_tx();
+                    None
+                }
+            }
+        };
+
+        if let Some(data) = mms_data {
+            match parse_mms_pdu(data) {
+                Ok(pdu) => {
+                    let conn_event = match &pdu {
+                        MmsPdu::InitiateRequest => MmsConnEvent::MmsInitReq,
+                        MmsPdu::InitiateResponse => MmsConnEvent::MmsInitResp,
+                        MmsPdu::ConcludeRequest => MmsConnEvent::MmsConcludeReq,
+                        MmsPdu::ConcludeResponse => MmsConnEvent::MmsConcludeResp,
+                        _ => MmsConnEvent::MmsData,
+                    };
+                    let valid = self.advance_state(conn_event);
+                    self.handle_mms_pdu(pdu, is_request);
+                    self.check_state_violation(valid);
+                }
+                Err(_) => {
+                    self.emit_malformed_tx();
+                }
+            }
+        }
+    }
+
+    /// COTP 连接管理帧处理：CR 创建事务，CC 更新已有事务，DR 推进状态。
+    fn handle_cotp_connection(&mut self, pdu_type: parser::CotpPduType) {
+        match pdu_type {
+            parser::CotpPduType::ConnectionRequest => {
+                let valid = self.advance_state(MmsConnEvent::CotpCr);
+                let tx = self.new_tx();
+                self.transactions.push_back(tx);
+                self.check_state_violation(valid);
+            }
+            parser::CotpPduType::ConnectionConfirm => {
+                let valid = self.advance_state(MmsConnEvent::CotpCc);
+                if let Some(tx) = self.find_open_request() {
+                    tx.tx_data.updated_tc = true;
+                    if !valid {
+                        tx.tx_data.set_event(
+                            Iec61850MmsEvent::ProtocolStateViolation as u8,
+                        );
+                    }
+                }
+            }
+            parser::CotpPduType::DisconnectRequest => {
+                self.advance_state(MmsConnEvent::CotpDr);
+            }
+            _ => {}
+        }
+    }
+
     /// 解析 TPKT/COTP 帧流。处理三个阶段：
     /// 1. 循环提取 TPKT 帧并按 COTP 类型分发
-    /// 2. 对 DataTransfer 帧：判断是直接 MMS 还是需剥离 Session/Presentation 层
-    /// 3. 解析 MMS PDU，驱动状态机，检测协议违规
+    /// 2. 对 DataTransfer 帧：重组分片后交由 handle_cotp_payload 处理
+    /// 3. 对连接管理帧：交由 handle_cotp_connection 处理
     fn parse_frames(&mut self, input: &[u8], is_request: bool) -> AppLayerResult {
         if input.is_empty() {
             return AppLayerResult::ok();
         }
 
-        // gap 恢复：丢包后等待下一个合法 TPKT 头再恢复解析
+        // gap 恢复：该方向发生过 TCP segment 缺失后，不再信任当前字节流偏移。
+        // 先探测输入是否从合法 TPKT 头开始；若不是，先返回 ok 等待更多数据，
+        // 避免在错误偏移上继续 BER/TPKT 解析引发连锁 malformed。
         if is_request && self.request_gap {
             if !parser::probe_tpkt(input) {
                 return AppLayerResult::ok();
             }
+            // 命中合法 TPKT 头，说明请求方向已重新对齐协议边界，清除 gap 标记。
             self.request_gap = false;
         } else if !is_request && self.response_gap {
             if !parser::probe_tpkt(input) {
                 return AppLayerResult::ok();
             }
+            // 命中合法 TPKT 头，说明响应方向已重新对齐协议边界，清除 gap 标记。
             self.response_gap = false;
         }
 
@@ -262,117 +399,26 @@ impl MmsState {
                     if frame.cotp.pdu_type == parser::CotpPduType::DataTransfer
                         && !frame.payload.is_empty()
                     {
-                        // 判断 COTP 载荷格式：直接 MMS 标签 vs Session/Presentation 封装
-                        let mms_data = if mms_pdu::is_direct_mms_pdu(frame.payload) {
-                            // Direct MMS PDU (mms-* pcap format)
-                            Some(frame.payload)
-                        } else {
-                            // May have Session/Presentation layers (iec61850_* pcap format)
-                            match mms_pdu::extract_mms_from_session(frame.payload) {
-                                Ok(Some(data)) => Some(data),
-                                Ok(None) => {
-                                    // Session CONNECT/ACCEPT → create Initiate transaction
-                                    let conn_event = if is_request {
-                                        MmsConnEvent::MmsInitReq
-                                    } else {
-                                        MmsConnEvent::MmsInitResp
-                                    };
-                                    let valid = self.advance_state(conn_event);
-                                    let pdu = if is_request {
-                                        MmsPdu::InitiateRequest
-                                    } else {
-                                        MmsPdu::InitiateResponse
-                                    };
-                                    self.handle_mms_pdu(pdu, is_request);
-                                    if !valid {
-                                        if let Some(tx) = self.transactions.back_mut() {
-                                            tx.tx_data.set_event(
-                                                Iec61850MmsEvent::ProtocolStateViolation as u8,
-                                            );
-                                        }
-                                    }
-                                    None
-                                }
-                                Err(_) => {
-                                    let mut tx = self.new_tx();
-                                    tx.tx_data
-                                        .set_event(Iec61850MmsEvent::MalformedData as u8);
-                                    self.transactions.push_back(tx);
-                                    None
-                                }
-                            }
-                        };
-
-                        if let Some(data) = mms_data {
-                            match mms_pdu::parse_mms_pdu(data) {
-                                Ok(pdu) => {
-                                    let conn_event = match &pdu {
-                                        MmsPdu::InitiateRequest => MmsConnEvent::MmsInitReq,
-                                        MmsPdu::InitiateResponse => MmsConnEvent::MmsInitResp,
-                                        MmsPdu::ConcludeRequest => MmsConnEvent::MmsConcludeReq,
-                                        MmsPdu::ConcludeResponse => MmsConnEvent::MmsConcludeResp,
-                                        _ => MmsConnEvent::MmsData,
-                                    };
-                                    let valid = self.advance_state(conn_event);
-                                    self.handle_mms_pdu(pdu, is_request);
-                                    if !valid {
-                                        if let Some(tx) = self.transactions.back_mut() {
-                                            tx.tx_data.set_event(
-                                                Iec61850MmsEvent::ProtocolStateViolation as u8,
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    let mut tx = self.new_tx();
-                                    tx.tx_data
-                                        .set_event(Iec61850MmsEvent::MalformedData as u8);
-                                    self.transactions.push_back(tx);
-                                }
-                            }
+                        if let Some(complete) = self.reassemble_cotp(
+                            frame.payload, frame.cotp.last_unit, is_request,
+                        ) {
+                            self.handle_cotp_payload(&complete, is_request);
                         }
-                    // 非 DataTransfer 帧：处理 COTP 连接管理
                     } else {
-                        match frame.cotp.pdu_type {
-                            parser::CotpPduType::ConnectionRequest => {
-                                let valid = self.advance_state(MmsConnEvent::CotpCr);
-                                let tx = self.new_tx();
-                                self.transactions.push_back(tx);
-                                if !valid {
-                                    if let Some(tx) = self.transactions.back_mut() {
-                                        tx.tx_data.set_event(
-                                            Iec61850MmsEvent::ProtocolStateViolation as u8,
-                                        );
-                                    }
-                                }
-                            }
-                            parser::CotpPduType::ConnectionConfirm => {
-                                let valid = self.advance_state(MmsConnEvent::CotpCc);
-                                if let Some(tx) = self.find_open_request() {
-                                    tx.tx_data.updated_tc = true;
-                                    if !valid {
-                                        tx.tx_data.set_event(
-                                            Iec61850MmsEvent::ProtocolStateViolation as u8,
-                                        );
-                                    }
-                                }
-                            }
-                            parser::CotpPduType::DisconnectRequest => {
-                                self.advance_state(MmsConnEvent::CotpDr);
-                            }
-                            _ => {}
-                        }
+                        self.handle_cotp_connection(frame.cotp.pdu_type);
                     }
                     start = rem;
                     if self.transactions.len() >= unsafe { IEC61850_MMS_MAX_TX } {
                         return AppLayerResult::err();
                     }
                 }
+                //当前输入字节还不够，让上层继续缓存并等待更多 TCP 数据再解析
                 Err(nom::Err::Incomplete(_)) => {
                     let consumed = input.len() - start.len();
                     let needed = start.len() + 1;
                     return AppLayerResult::incomplete(consumed as u32, needed as u32);
                 }
+                //协议解析错误
                 Err(_) => {
                     return AppLayerResult::err();
                 }
@@ -382,20 +428,24 @@ impl MmsState {
         return AppLayerResult::ok();
     }
 
+    /// 解析请求方向的 TPKT/COTP 帧流。
     fn parse_request(&mut self, input: &[u8]) -> AppLayerResult {
         self.parse_frames(input, true)
     }
 
+    /// 解析响应方向的 TPKT/COTP 帧流。
     fn parse_response(&mut self, input: &[u8]) -> AppLayerResult {
         self.parse_frames(input, false)
     }
 
     fn on_request_gap(&mut self, _size: u32) {
         self.request_gap = true;
+        self.ts_cotp_buf.clear(); // gap 后残留的分片数据不可靠，必须丢弃
     }
 
     fn on_response_gap(&mut self, _size: u32) {
         self.response_gap = true;
+        self.tc_cotp_buf.clear();
     }
 }
 
@@ -405,6 +455,7 @@ unsafe extern "C" fn iec61850_mms_probing_parser(
     _flow: *const Flow, _direction: u8, input: *const u8, input_len: u32, _rdir: *mut u8,
 ) -> AppProto {
     if input_len >= 4 && !input.is_null() {
+        // 至少需要 4 字节：TPKT 头（3 字节） + COTP 头（1 字节）
         let slice = build_slice!(input, input_len as usize);
         if parser::probe_tpkt(slice) {
             return ALPROTO_IEC61850_MMS;
@@ -849,6 +900,172 @@ mod tests {
         assert_eq!(state.conn_state, MmsConnState::MmsAssociated);
     }
 
+    // ====== COTP 分片重组测试 ======
+
+    /// 基本场景：MMS PDU 被拆成 2 个 COTP DT 帧（EOT=0 + EOT=1）
+    #[test]
+    fn test_cotp_reassembly_two_fragments() {
+        let mut state = MmsState::new();
+
+        // 构造一个 MMS Initiate-Request PDU: A8 03 80 01 01 (5字节)
+        // 拆成两帧发送：
+        //   帧1: COTP DT, EOT=0, 载荷 = [A8 03 80]     (前3字节)
+        //   帧2: COTP DT, EOT=1, 载荷 = [01 01]         (后2字节)
+
+        // 帧1: TPKT(length=10) + COTP DT(EOT=0) + 3字节片段
+        let frame1 = [
+            0x03, 0x00, 0x00, 0x0A, // TPKT: version=3, length=10
+            0x02, 0xF0, 0x00,       // COTP DT: length=2, type=0xF0, EOT=0 (0x00)
+            0xA8, 0x03, 0x80,       // MMS 片段1 (不完整)
+        ];
+        let result = state.parse_request(&frame1);
+        assert_eq!(result, AppLayerResult { status: 0, consumed: 0, needed: 0 });
+        // EOT=0 → 缓冲中，不应产生任何事务
+        assert_eq!(state.tx_id, 0);
+
+        // 帧2: TPKT(length=9) + COTP DT(EOT=1) + 2字节片段
+        let frame2 = [
+            0x03, 0x00, 0x00, 0x09, // TPKT: version=3, length=9
+            0x02, 0xF0, 0x80,       // COTP DT: length=2, type=0xF0, EOT=1 (0x80)
+            0x01, 0x01,             // MMS 片段2
+        ];
+        let result = state.parse_request(&frame2);
+        assert_eq!(result, AppLayerResult { status: 0, consumed: 0, needed: 0 });
+        // EOT=1 → 重组完成，应成功解析出 InitiateRequest
+        assert_eq!(state.tx_id, 1);
+        let tx = state.transactions.front().unwrap();
+        match tx.request.as_ref().unwrap() {
+            MmsPdu::InitiateRequest => {}
+            other => panic!("Expected InitiateRequest, got {:?}", other),
+        }
+    }
+
+    /// 响应���向的分片重组：服务端返回分片的 Confirmed-Response
+    #[test]
+    fn test_cotp_reassembly_response_direction() {
+        let mut state = MmsState::new();
+
+        // 先创建一个请求事务
+        let req_buf = [
+            0x03, 0x00, 0x00, 0x13,
+            0x02, 0xF0, 0x80,
+            0xA0, 0x0A,
+            0x02, 0x01, 0x01, // invokeID=1
+            0xA4, 0x05, 0xA1, 0x03, 0xA0, 0x01, 0x00,
+        ];
+        state.parse_request(&req_buf);
+        assert_eq!(state.tx_id, 1);
+
+        // Confirmed-Response: A1 07 02 01 01 A4 02 A1 00 (9字节)
+        // 拆成两帧：
+        //   帧1 (EOT=0): [A1 07 02 01 01]  (5字节)
+        //   帧2 (EOT=1): [A4 02 A1 00]     (4字节)
+
+        let resp_frame1 = [
+            0x03, 0x00, 0x00, 0x0C, // TPKT: length=12
+            0x02, 0xF0, 0x00,       // COTP DT: EOT=0
+            0xA1, 0x07, 0x02, 0x01, 0x01, // 响应片段1
+        ];
+        state.parse_response(&resp_frame1);
+        // 尚未收全，事务不应有 response
+        let tx = state.transactions.front().unwrap();
+        assert!(tx.response.is_none());
+
+        let resp_frame2 = [
+            0x03, 0x00, 0x00, 0x0B, // TPKT: length=11
+            0x02, 0xF0, 0x80,       // COTP DT: EOT=1
+            0xA4, 0x02, 0xA1, 0x00, // 响应片段2
+        ];
+        state.parse_response(&resp_frame2);
+        // 重组完成，应匹配到 invokeID=1 的事务
+        let tx = state.transactions.front().unwrap();
+        assert!(tx.response.is_some());
+        match tx.response.as_ref().unwrap() {
+            MmsPdu::ConfirmedResponse { invoke_id, service } => {
+                assert_eq!(*invoke_id, 1);
+                assert_eq!(*service, MmsConfirmedService::Read);
+            }
+            other => panic!("Expected ConfirmedResponse, got {:?}", other),
+        }
+    }
+
+    /// 非分片帧（EOT=1）应继续正常工作，不走缓冲区
+    #[test]
+    fn test_cotp_reassembly_single_frame_unchanged() {
+        let mut state = MmsState::new();
+        // 单帧 EOT=1，和之前的测试一样
+        let buf = [
+            0x03, 0x00, 0x00, 0x0C,
+            0x02, 0xF0, 0x80, // EOT=1
+            0xA8, 0x03, 0x80, 0x01, 0x01,
+        ];
+        let result = state.parse_request(&buf);
+        assert_eq!(result, AppLayerResult { status: 0, consumed: 0, needed: 0 });
+        assert_eq!(state.tx_id, 1);
+    }
+
+    /// 两个方向的分片互不干扰
+    #[test]
+    fn test_cotp_reassembly_independent_directions() {
+        let mut state = MmsState::new();
+
+        // 请求方向帧1 (EOT=0): Initiate-Request 前半段
+        let req_f1 = [
+            0x03, 0x00, 0x00, 0x0A,
+            0x02, 0xF0, 0x00, // EOT=0
+            0xA8, 0x03, 0x80,
+        ];
+        state.parse_request(&req_f1);
+        assert_eq!(state.tx_id, 0); // 请求方向还在缓冲
+
+        // 响应方向帧 (EOT=1): 完整的 Initiate-Response（不受请求方向影响）
+        let resp = [
+            0x03, 0x00, 0x00, 0x0C,
+            0x02, 0xF0, 0x80, // EOT=1
+            0xA9, 0x03, 0x80, 0x01, 0x01,
+        ];
+        state.parse_response(&resp);
+        // 响应方向独立完成，创建了只有 response 的事务
+        assert_eq!(state.tx_id, 1);
+
+        // 请求方向帧2 (EOT=1): 补齐
+        let req_f2 = [
+            0x03, 0x00, 0x00, 0x09,
+            0x02, 0xF0, 0x80, // EOT=1
+            0x01, 0x01,
+        ];
+        state.parse_request(&req_f2);
+        // 请求方向重组完成
+        assert_eq!(state.tx_id, 2);
+    }
+
+    /// TCP gap 应清空重组缓冲区
+    #[test]
+    fn test_cotp_reassembly_gap_clears_buffer() {
+        let mut state = MmsState::new();
+
+        // 帧1 (EOT=0): 开始分片
+        let frame1 = [
+            0x03, 0x00, 0x00, 0x0A,
+            0x02, 0xF0, 0x00, // EOT=0
+            0xA8, 0x03, 0x80,
+        ];
+        state.parse_request(&frame1);
+        assert_eq!(state.tx_id, 0);
+
+        // 发生 TCP gap → 缓冲区中的不完整数据应被丢弃
+        state.on_request_gap(100);
+
+        // gap 后收到新的完整帧，应能正常解析（不受之前残留数据影响）
+        let fresh = [
+            0x03, 0x00, 0x00, 0x0C,
+            0x02, 0xF0, 0x80,
+            0xA8, 0x03, 0x80, 0x01, 0x01,
+        ];
+        state.parse_request(&fresh);
+        assert_eq!(state.tx_id, 1);
+    }
+
     #[test]
     fn test_conn_state_cotp_disconnect() {
         let mut state = MmsState::new();
@@ -873,5 +1090,222 @@ mod tests {
         ];
         state.parse_request(&dr_buf);
         assert_eq!(state.conn_state, MmsConnState::Closed);
+    }
+
+    // ====== Session/Presentation 层测试 ======
+
+    /// Session CONNECT (0x0D) → SessionExtractResult::Init → 创建 InitiateRequest 事务
+    #[test]
+    fn test_session_layer_init_request() {
+        let mut state = MmsState::new();
+        // TPKT + COTP DT + Session CONNECT SPDU (type=0x0D, length=0x00)
+        let buf = [
+            0x03, 0x00, 0x00, 0x09, // TPKT: length=9
+            0x02, 0xF0, 0x80,       // COTP DT: EOT=1
+            0x0D, 0x00,             // Session CONNECT
+        ];
+        let result = state.parse_request(&buf);
+        assert_eq!(result, AppLayerResult { status: 0, consumed: 0, needed: 0 });
+        // Init 路径应创建 InitiateRequest 事务
+        assert_eq!(state.tx_id, 1);
+        let tx = state.transactions.front().unwrap();
+        match tx.request.as_ref().unwrap() {
+            MmsPdu::InitiateRequest => {}
+            other => panic!("Expected InitiateRequest, got {:?}", other),
+        }
+        // 状态转换：Idle → InitPending（兼容直接 MMS 格式路径）
+        assert_eq!(state.conn_state, MmsConnState::InitPending);
+    }
+
+    /// Session ACCEPT (0x0E) → SessionExtractResult::Init → 匹配为 InitiateResponse
+    #[test]
+    fn test_session_layer_init_response() {
+        let mut state = MmsState::new();
+        // 预设状态为 InitPending，模拟已发送 Init 请求
+        state.conn_state = MmsConnState::InitPending;
+        let mut tx = state.new_tx();
+        tx.request = Some(MmsPdu::InitiateRequest);
+        state.transactions.push_back(tx);
+
+        // TPKT + COTP DT + Session ACCEPT SPDU
+        let buf = [
+            0x03, 0x00, 0x00, 0x09, // TPKT: length=9
+            0x02, 0xF0, 0x80,       // COTP DT: EOT=1
+            0x0E, 0x00,             // Session ACCEPT
+        ];
+        let result = state.parse_response(&buf);
+        assert_eq!(result, AppLayerResult { status: 0, consumed: 0, needed: 0 });
+        // 响应应匹配到已有的请求事务
+        assert_eq!(state.transactions.len(), 1);
+        let tx = state.transactions.front().unwrap();
+        match tx.response.as_ref().unwrap() {
+            MmsPdu::InitiateResponse => {}
+            other => panic!("Expected InitiateResponse, got {:?}", other),
+        }
+        // 状态转换：InitPending → MmsAssociated
+        assert_eq!(state.conn_state, MmsConnState::MmsAssociated);
+    }
+
+    /// Session FINISH (0x09) → SessionExtractResult::SessionClose → 状态转 Closed
+    #[test]
+    fn test_session_layer_close() {
+        let mut state = MmsState::new();
+        // 预设为 MmsAssociated 状态
+        state.conn_state = MmsConnState::MmsAssociated;
+
+        // TPKT + COTP DT + Session FINISH SPDU
+        let buf = [
+            0x03, 0x00, 0x00, 0x09, // TPKT: length=9
+            0x02, 0xF0, 0x80,       // COTP DT: EOT=1
+            0x09, 0x00,             // Session FINISH
+        ];
+        let result = state.parse_request(&buf);
+        assert_eq!(result, AppLayerResult { status: 0, consumed: 0, needed: 0 });
+        // SessionClose 不创建事务，只推进状态机
+        assert_eq!(state.tx_id, 0);
+        assert_eq!(state.transactions.len(), 0);
+        // 状态转换：MmsAssociated → Closed（经由 CotpDr 事件）
+        assert_eq!(state.conn_state, MmsConnState::Closed);
+    }
+
+    /// Session Give Tokens + Data Transfer + Presentation 层 → 提取并解析 MMS PDU
+    #[test]
+    fn test_session_layer_mms_data() {
+        let mut state = MmsState::new();
+        // 预设为 MmsAssociated 状态
+        state.conn_state = MmsConnState::MmsAssociated;
+
+        // 完整的 Session/Presentation/MMS 协议栈：
+        //   Session: Give Tokens (01 00) + Data Transfer (01 00)
+        //   Presentation: fully-encoded-data [APPLICATION 1] (0x61)
+        //     PDV-list: SEQUENCE (0x30)
+        //       context-id: INTEGER = 3
+        //       single-ASN1-type [0]: MMS ConcludeRequest (0xAB 0x00)
+        let buf = [
+            0x03, 0x00, 0x00, 0x16, // TPKT: length=22
+            0x02, 0xF0, 0x80,       // COTP DT: EOT=1
+            // Session: Give Tokens + Data Transfer
+            0x01, 0x00, 0x01, 0x00,
+            // Presentation: fully-encoded-data
+            0x61, 0x09,             // [APPLICATION 1], length=9
+            0x30, 0x07,             // SEQUENCE (PDV-list entry), length=7
+            0x02, 0x01, 0x03,       // INTEGER presentation-context-id=3
+            0xA0, 0x02,             // [0] single-ASN1-type wrapper, length=2
+            0xAB, 0x00,             // MMS ConcludeRequest
+        ];
+        let result = state.parse_request(&buf);
+        assert_eq!(result, AppLayerResult { status: 0, consumed: 0, needed: 0 });
+        // 应成功提取并解析出 ConcludeRequest
+        assert_eq!(state.tx_id, 1);
+        let tx = state.transactions.front().unwrap();
+        match tx.request.as_ref().unwrap() {
+            MmsPdu::ConcludeRequest => {}
+            other => panic!("Expected ConcludeRequest, got {:?}", other),
+        }
+        // 状态转换：MmsAssociated → Concluding
+        assert_eq!(state.conn_state, MmsConnState::Concluding);
+    }
+
+    // ====== 畸形数据测试 ======
+
+    /// 直接 MMS 标签但 BER 编码无效 → parse_mms_pdu 失败 → MalformedData 事务
+    #[test]
+    fn test_malformed_mms_pdu() {
+        let mut state = MmsState::new();
+        // 0xA0 在 MMS 标签范围内，但声明长度=16 而实际只有 1 字节内容
+        let buf = [
+            0x03, 0x00, 0x00, 0x0A, // TPKT: length=10
+            0x02, 0xF0, 0x80,       // COTP DT: EOT=1
+            0xA0, 0x10, 0x01,       // Invalid MMS: tag=0xA0, length=16, only 1 byte
+        ];
+        let result = state.parse_request(&buf);
+        assert_eq!(result, AppLayerResult { status: 0, consumed: 0, needed: 0 });
+        // 应创建一个仅含 MalformedData 事件的空事务（无 request/response）
+        assert_eq!(state.tx_id, 1);
+        let tx = state.transactions.front().unwrap();
+        assert!(tx.request.is_none());
+        assert!(tx.response.is_none());
+    }
+
+    /// 非 MMS 且非合法 Session SPDU → extract_mms_from_session 返回 Err → MalformedData
+    #[test]
+    fn test_malformed_session_data() {
+        let mut state = MmsState::new();
+        // 0x55 既不在 MMS 标签范围，也不是有效 Session SPDU 类型
+        let buf = [
+            0x03, 0x00, 0x00, 0x09, // TPKT: length=9
+            0x02, 0xF0, 0x80,       // COTP DT: EOT=1
+            0x55, 0x00,             // Unknown SPDU type
+        ];
+        let result = state.parse_request(&buf);
+        assert_eq!(result, AppLayerResult { status: 0, consumed: 0, needed: 0 });
+        // 同样创建仅含事件的空事务
+        assert_eq!(state.tx_id, 1);
+        let tx = state.transactions.front().unwrap();
+        assert!(tx.request.is_none());
+        assert!(tx.response.is_none());
+    }
+
+    // ====== Incomplete 帧测试 ======
+
+    /// TPKT 声明长度 > 实际可用字节 → 返回 AppLayerResult::incomplete
+    #[test]
+    fn test_incomplete_tpkt() {
+        let mut state = MmsState::new();
+        // TPKT header 声明 length=12，但只提供 7 字节（载荷不完整）
+        let buf = [
+            0x03, 0x00, 0x00, 0x0C, // TPKT: length=12
+            0x02, 0xF0, 0x80,       // COTP DT 头（3 字节，TPKT 需要 8 字节载荷）
+        ];
+        let result = state.parse_request(&buf);
+        // incomplete: consumed=0（首帧即不完整），needed=buf.len()+1=8
+        assert_eq!(result, AppLayerResult { status: 1, consumed: 0, needed: 8 });
+        // 不应创建任何事务
+        assert_eq!(state.tx_id, 0);
+    }
+
+    /// 第一帧完整、第二帧不完整 → 返回已消费字节数 + 所需字节数
+    #[test]
+    fn test_incomplete_second_frame() {
+        let mut state = MmsState::new();
+        let mut buf = Vec::new();
+        // 帧1: 完整的 Initiate-Request（12 字节）
+        buf.extend_from_slice(&[
+            0x03, 0x00, 0x00, 0x0C,
+            0x02, 0xF0, 0x80,
+            0xA8, 0x03, 0x80, 0x01, 0x01,
+        ]);
+        // 帧2: 不完整的 TPKT 头（仅 2 字节）
+        buf.extend_from_slice(&[0x03, 0x00]);
+
+        let result = state.parse_request(&buf);
+        // 帧1 消费 12 字节；帧2 剩余 2 字节不完整，需要 3 字节
+        assert_eq!(result, AppLayerResult { status: 1, consumed: 12, needed: 3 });
+        // 帧1 应成功解析
+        assert_eq!(state.tx_id, 1);
+    }
+
+    // ====== 事务数超限测试 ======
+
+    /// 事务数达到 MAX_TX 上限 → parse_frames 返回 AppLayerResult::err()
+    #[test]
+    fn test_too_many_transactions() {
+        let mut state = MmsState::new();
+        let max_tx = unsafe { IEC61850_MMS_MAX_TX };
+        // 预填充 max_tx - 1 个事务
+        for _ in 0..max_tx - 1 {
+            let tx = state.new_tx();
+            state.transactions.push_back(tx);
+        }
+        assert_eq!(state.transactions.len(), max_tx - 1);
+
+        // 再解析一帧 → 事务数达到 max_tx → 触发超限返回 err
+        let buf = [
+            0x03, 0x00, 0x00, 0x0C,
+            0x02, 0xF0, 0x80,
+            0xA8, 0x03, 0x80, 0x01, 0x01,
+        ];
+        let result = state.parse_request(&buf);
+        assert_eq!(result, AppLayerResult { status: -1, consumed: 0, needed: 0 });
     }
 }

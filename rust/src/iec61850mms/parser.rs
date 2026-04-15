@@ -69,6 +69,8 @@ pub struct CotpHeader {
 }
 
 /// Parsed result of one TPKT/COTP frame
+/// 'a 表示 TpktCotpFrame 中 payload: &'a [u8] 所借用的那段输入字节的生命周期。
+/// 编译器会强制约束：任何 TpktCotpFrame<'a> 实例的使用范围，都不能超过这段被借用字节数据的有效范围。
 #[derive(Debug, PartialEq)]
 pub struct TpktCotpFrame<'a> {
     pub tpkt: TpktHeader,
@@ -80,13 +82,18 @@ pub struct TpktCotpFrame<'a> {
 /// Parse a TPKT header.
 pub fn parse_tpkt_header(i: &[u8]) -> IResult<&[u8], TpktHeader> {
     let (i, version) = nom7::number::streaming::u8(i)?;
-    let (i, _reserved) = nom7::number::streaming::u8(i)?;
+    let (i, reserved) = nom7::number::streaming::u8(i)?;
     let (i, length) = be_u16(i)?;
+    if reserved != 0 {
+        return Err(nom7::Err::Error(nom7::error::Error::new(
+            i,
+            nom7::error::ErrorKind::Verify,
+        )));
+    }
     Ok((i, TpktHeader { version, length }))
 }
 
-/// Parse a COTP header. The `available` parameter is the number of bytes
-/// available in the TPKT payload (after the 4-byte TPKT header).
+/// Parse a COTP header from TPKT payload.
 pub fn parse_cotp_header(i: &[u8]) -> IResult<&[u8], CotpHeader> {
     let (i, length) = nom7::number::streaming::u8(i)?;
     let (i, pdu_type_byte) = nom7::number::streaming::u8(i)?;
@@ -94,12 +101,18 @@ pub fn parse_cotp_header(i: &[u8]) -> IResult<&[u8], CotpHeader> {
 
     match pdu_type {
         CotpPduType::DataTransfer => {
+            if length < 2 {
+                return Err(nom7::Err::Error(nom7::error::Error::new(
+                    i,
+                    nom7::error::ErrorKind::Verify,
+                )));
+            }
             // DT 帧格式：length(1) + type(1) + nr_and_eot(1)，之后是数据载荷
             let (i, nr_and_eot) = nom7::number::streaming::u8(i)?;
             let last_unit = (nr_and_eot & 0x80) != 0; // 最高位 = EOT
             let tpdu_nr = nr_and_eot & 0x7F;          // 低 7 位 = 序号
             // Skip any remaining COTP header bytes (length includes pdu_type byte)
-            let remaining_header = if length > 2 { length - 2 } else { 0 };
+            let remaining_header = length - 2;
             let (i, _) = take(remaining_header as usize)(i)?;
             Ok((
                 i,
@@ -111,9 +124,18 @@ pub fn parse_cotp_header(i: &[u8]) -> IResult<&[u8], CotpHeader> {
                 },
             ))
         }
-        _ => {
+        //CR/CC/DR 帧：length 字段后的字节全属于 COTP 头部参数，直接跳过
+        CotpPduType::ConnectionRequest
+        | CotpPduType::ConnectionConfirm
+        | CotpPduType::DisconnectRequest => {
+            if length < 1 {
+                return Err(nom7::Err::Error(nom7::error::Error::new(
+                    i,
+                    nom7::error::ErrorKind::Verify,
+                )));
+            }
             // CR/CC/DR 帧：length 字段后的字节全属于 COTP 头部参数，直接跳过
-            let remaining = if length > 1 { length - 1 } else { 0 };
+            let remaining = length - 1;
             let (i, _) = take(remaining as usize)(i)?;
             Ok((
                 i,
@@ -125,22 +147,27 @@ pub fn parse_cotp_header(i: &[u8]) -> IResult<&[u8], CotpHeader> {
                 },
             ))
         }
+        CotpPduType::Unknown(_) => Err(nom7::Err::Error(nom7::error::Error::new(
+            i,
+            nom7::error::ErrorKind::Verify,
+        ))),
     }
 }
 
-/// Parse a complete TPKT + COTP frame, returning the MMS payload.
+/// 解析完整的 TPKT + COTP 帧，并返回其负载（供上层进一步处理）。
 ///
-/// Uses streaming parsers so incomplete data returns `Incomplete`.
+/// 使用流式解析器；当输入数据不足时返回 `Incomplete`。
 pub fn parse_tpkt_cotp_frame(i: &[u8]) -> IResult<&[u8], TpktCotpFrame<'_>> {
     let (i, tpkt) = parse_tpkt_header(i)?;
 
-    // Validate TPKT
+    // 验证 TPKT 版本和长度
     if tpkt.version != TPKT_VERSION {
         return Err(nom7::Err::Error(nom7::error::Error::new(
             i,
             nom7::error::ErrorKind::Verify,
         )));
     }
+    // 验证 TPKT 长度是否足够
     if (tpkt.length as usize) < TPKT_HEADER_LEN {
         return Err(nom7::Err::Error(nom7::error::Error::new(
             i,
@@ -154,7 +181,7 @@ pub fn parse_tpkt_cotp_frame(i: &[u8]) -> IResult<&[u8], TpktCotpFrame<'_>> {
     // 精确提取 TPKT 载荷，剩余字节留给下一帧
     let (remaining, tpkt_payload) = take(payload_len)(i)?;
 
-    // Parse COTP from the TPKT payload
+    // 解析 COTP 头，获取 COTP 头和 MMS 负载
     let (mms_payload, cotp) = parse_cotp_header(tpkt_payload)?;
 
     Ok((
@@ -162,7 +189,7 @@ pub fn parse_tpkt_cotp_frame(i: &[u8]) -> IResult<&[u8], TpktCotpFrame<'_>> {
         TpktCotpFrame {
             tpkt,
             cotp,
-            payload: mms_payload,
+            payload: mms_payload,//mms负载
         },
     ))
 }
@@ -215,6 +242,12 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tpkt_header_reserved_not_zero() {
+        let buf = [0x03, 0x01, 0x00, 0x1F];
+        assert!(parse_tpkt_header(&buf).is_err());
+    }
+
+    #[test]
     fn test_parse_cotp_dt() {
         // COTP DT: length=2, pdu_type=0xF0, last_unit=1 (tpdu_nr=0, eot=1)
         let buf = [0x02, 0xF0, 0x80, 0xAA, 0xBB];
@@ -253,6 +286,12 @@ mod tests {
         assert!(cotp.last_unit);
         // remaining bytes after COTP header should be just 0xAA
         assert_eq!(rem, &[0xAA]);
+    }
+
+    #[test]
+    fn test_parse_cotp_unknown_type() {
+        let buf = [0x02, 0x40, 0x80];
+        assert!(parse_cotp_header(&buf).is_err());
     }
 
     #[test]
