@@ -353,7 +353,7 @@ track 选项：
 - `by_src`：按源 IP 跟踪
 - `by_dst`：按目标 IP 跟踪
 - `by_rule`：全局跟踪（不分 IP）
-- `by_both`：按 IP 对��踪
+- `by_both`：按 IP 对追踪
 - `by_flow`：按流跟踪
 
 ### 5.2 suppress

@@ -6,7 +6,7 @@
 
 ## 1. 检测引擎在流水线中的位置
 
-��顾 FlowWorker 流水线，检测引擎处于应用层解析之后：
+回顾 FlowWorker 流水线，检测引擎处于应用层解析之后：
 
 ```
 [Decode] → FlowWorker {
@@ -137,7 +137,7 @@ enum DetectKeywordId {
 };
 ```
 
-枚举的前面部分（`DETECT_APP_LAYER_PROTOCOL` 到 `DETECT_FLOW`）按预过滤优先级排列——ID 越小的关键字在自���预过滤选择时优先级越高。
+枚举的前面部分（`DETECT_APP_LAYER_PROTOCOL` 到 `DETECT_FLOW`）按预过滤优先级排列——ID 越小的关键字在自动预过滤选择时优先级越高。
 
 ### 3.3 SIGMATCH 标志
 
@@ -214,7 +214,7 @@ for (int type = 0; type < DETECT_SM_LIST_MAX; type++) {
 }
 ```
 
-转换完成后，`SigMatch` 链表���释放，`init_data` 被整体释放，节省大量内存。运行时检测引擎只需遍历 `SigMatchData` 数组，用 `is_last` 判断终止，比遍历链表更快且缓存友好。
+转换完成后，`SigMatch` 链表被释放，`init_data` 被整体释放，节省大量内存。运行时检测引擎只需遍历 `SigMatchData` 数组，用 `is_last` 判断终止，比遍历链表更快且缓存友好。
 
 ### 4.3 签名匹配列表分类
 

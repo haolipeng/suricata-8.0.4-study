@@ -321,7 +321,7 @@ if (alproto == ALPROTO_UNKNOWN && (flags & STREAM_START)) {
 }
 ```
 
-**GAP 处理**：当 TCP 重组遇到间隙（丢包）时，带 `STREAM_GAP` 标志调用此函数。如果协议解析��注册了 `APP_LAYER_PARSER_OPT_ACCEPT_GAPS` 标志，间隙会被传递给解析器处理；否则解析器进入错误状态。
+**GAP 处理**：当 TCP 重组遇到间隙（丢包）时，带 `STREAM_GAP` 标志调用此函数。如果协议解析器注册了 `APP_LAYER_PARSER_OPT_ACCEPT_GAPS` 标志，间隙会被传递给解析器处理；否则解析器进入错误状态。
 
 ### 4.2 TCPProtoDetect
 
@@ -845,7 +845,7 @@ struct AppLayerProtoDetectThreadCtx_ {
    │               │     → 返回 OK/ERROR/INCOMPLETE
    │               └── 更新 pstate 标志
    │
-   ├── Detect()        ← 使用事务��行规则匹配
+   ├── Detect()        ← 使用事务进行规则匹配
    └── OutputLoggerLog() ← 使用事务生成日志
 ```
 

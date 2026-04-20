@@ -595,7 +595,7 @@ TmEcode TmThreadsSlotVarRun(ThreadVars *tv, Packet *p, TmSlot *slot)
             return TM_ECODE_FAILED;
         }
 
-        // 解码模块可能产生��包（如 IPv4-in-IPv6 隧道），需要递归处理
+        // 解码模块可能产生子包（如 IPv4-in-IPv6 隧道），需要递归处理
         if (s->tm_flags & TM_FLAG_DECODE_TM) {
             TmThreadsProcessDecodePseudoPackets(tv, &tv->decode_pq, s->slot_next);
         }

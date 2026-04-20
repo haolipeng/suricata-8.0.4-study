@@ -204,7 +204,7 @@ pub fn sc_detect_engine_state_free(state: *mut DetectEngineState) {
 
 这个设计有一个重要原因：**让 Rust 单元测试能独立编译**。
 
-如果 Rust 代码直接声明 `extern "C" { fn SCLogMessage(...); }`，那么 `cargo test` 时链接器会找不到 `SCLogMessage` 的实现（因为没��接 C 代码）。通过函数指针表 + `Option` 包装，Rust 测试可以在 `SC = None` 的状态下运行，不需要 C 代码参与。
+如果 Rust 代码直接声明 `extern "C" { fn SCLogMessage(...); }`，那么 `cargo test` 时链接器会找不到 `SCLogMessage` 的实现（因为没链接 C 代码）。通过函数指针表 + `Option` 包装，Rust 测试可以在 `SC = None` 的状态下运行，不需要 C 代码参与。
 
 ---
 

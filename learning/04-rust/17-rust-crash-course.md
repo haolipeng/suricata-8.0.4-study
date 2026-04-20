@@ -424,7 +424,7 @@ match parser::dns_parse_body(body, input, header) {
 
 ### 6.3 if let：只关心一个变体
 
-当你只关心枚举的某一个变体时��`if let` 比完整的 `match` 更简洁：
+当你只关心枚举的某一个变体时，`if let` 比完整的 `match` 更简洁：
 
 ```rust
 // rust/src/dns/dns.rs:305-313

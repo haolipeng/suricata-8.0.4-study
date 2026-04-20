@@ -934,7 +934,7 @@ stream:
 
 `TcpSession` 和 `TcpSegment` 都使用线程本地对象池（`PoolThread`）管理，避免频繁的 malloc/free：
 
-- **TcpSession 池**：全局 `PoolThread *ssn_pool`，���个工作线程有独立的池分区
+- **TcpSession 池**：全局 `PoolThread *ssn_pool`，每个工作线程有独立的池分区
 - **TcpSegment 池**：在 `TcpReassemblyThreadCtx` 中管理
 
 对象池预分配一批对象，回收时不释放内存，而是归还到池中供后续复用。

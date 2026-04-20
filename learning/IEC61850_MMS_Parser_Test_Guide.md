@@ -66,7 +66,7 @@ cd "$SURICATA_DIR/rust" && cargo test --lib iec61850mms
 预期输出（关注最后一行）：
 
 ```
-test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 552 filtered out
+test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 552 filtered out
 ```
 
 如果出现 failed > 0，停止后续测试，先排查单元测试失败原因。
@@ -385,14 +385,14 @@ TX: (empty - COTP connection)
 ### 4.1 必须通过的条件
 
 1. **编译成功**：`make -j$(nproc)` 无错误
-2. **单元测试全通过**：`cargo test --lib iec61850mms` 输出 32 passed, 0 failed
+2. **单元测试全通过**：`cargo test --lib iec61850mms` 输出 75 passed, 0 failed
 3. **iec61850_\* 系列 malformed 为 0**：所有 5 个 iec61850 pcap 的 malformed_data 计数必须为 0
 4. **回归测试通过**：`mms-readRequest` 的 malformed=0，EVE 日志中包含 `service: "read"`
 5. **扩展服务正确识别**：每个 mms-* 扩展服务 pcap 的 EVE 日志中，`service` 字段必须显示对应的服务名称（非 `"unknown"`）
 
 ### 4.2 已知限制（非失败项）
 
-- **mms-confirmedRequestPDU malformed=1**：该 pcap 由测试工具生成，服务端响应帧中包含无法识别的数据格式。Wireshark/tshark 也���法解析该帧。不视为解析器缺陷。
+- **mms-confirmedRequestPDU malformed=1**：该 pcap 由测试工具生成，服务端响应帧中包含无法识别的数据格式。Wireshark/tshark 也无法解析该帧。不视为解析器缺陷。
 - **ConfirmedResponse 中 `service=unknown`**：部分测试 pcap 的响应仅含 invoke_id 无 service 标签（最小化响应）。解析器容错处理为 `unknown`，不视为缺陷。
 
 ## 5. 一键自动化测试
@@ -735,3 +735,731 @@ parse_frames()                            ← mms.rs:260
 - **代码修复是必要的**：仅此一项即可将 malformed 从 18 降至 1，并新增识别 `conclude_request` 和 `cancel_request` PDU 类型。适用于所有原始 pcap，无需修改任何 pcap 文件。
 - **pcap 修复是可选的**：修复 pcap 中的 TPKT/COTP 错误可使服务端响应也被解析（如识别 `initiate_response`、`confirmed_response` 等），但需配合 `-k none` 绕过校验和。仅对需要验证双向解析的场景有意义。
 - 剩余的 1 个 malformed（`mms-confirmedRequestPDU`）是该 pcap 中服务端帧特有的数据格式问题，非上述两类缺陷。
+
+## 7. GetNameList 三种查询类型专项测试
+
+本节针对 GetNameList 服务的三种核心查询类型（domain / variable / variableList）进行专项验证，涵盖 pcap 集成测试和 Rust 单元测试两个层面。
+
+### 7.1 背景
+
+IEC 61850 中 GetNameList 有三种典型用法：
+
+| 查询类型 | objectClass 值 | 典型 objectScope | 业务含义 |
+|---------|---------------|-----------------|---------|
+| 列出逻辑设备 | `domain` (9) | vmdSpecific | 发现 IED 上有哪些逻辑设备 |
+| 列出变量 | `named_variable` (0) | domainSpecific | 发现某逻辑设备下的数据属性 |
+| 列出数据集 | `named_variable_list` (2) | domainSpecific / aaSpecific | 发现数据集（Report/GOOSE 基础） |
+
+代码中三种类型的解析路径完全一致（`parse_get_name_list_request` 中通过整数值映射字符串），区别仅在 `object_class` 字段的取值。
+
+### 7.2 pcap 集成测试 — 使用 iec61850_get_name_list.pcap
+
+#### 7.2.1 运行 Suricata
+
+```bash
+export SURICATA_DIR="/home/work/suricata-8.0.4-study"
+export PCAP_DIR="/home/work/iec61850_protocol_parser/pcaps_file"
+export SURICATA_YAML="$SURICATA_DIR/suricata.yaml"
+export GNL_OUT="/tmp/mms_test_gnl"
+
+rm -rf "$GNL_OUT" && mkdir -p "$GNL_OUT"
+suricata -r "$PCAP_DIR/iec61850_get_name_list.pcap" \
+    -S /dev/null -c "$SURICATA_YAML" -l "$GNL_OUT" 2>/dev/null
+echo "done"
+```
+
+#### 7.2.2 输出文件位置
+
+| 文件 | 路径 | 说明 |
+|-----|------|------|
+| EVE JSON 日志 | `/tmp/mms_test_gnl/eve.json` | 主要检查目标，包含 MMS 应用层日志 |
+| Suricata 运行日志 | `/tmp/mms_test_gnl/suricata.log` | 排错用，正常运行时无 error |
+| Stats 日志 | `/tmp/mms_test_gnl/stats.log` | 性能统计，本测试无需关注 |
+
+#### 7.2.3 提取 GetNameList 事务详情
+
+```bash
+python3 learning/tests/extract_gnl_details.py /tmp/mms_test_gnl/eve.json
+```
+
+#### 7.2.4 预期输出
+
+```
+=== GetNameList Transaction ===
+  Request:
+    pdu_type:     confirmed_request
+    invoke_id:    0
+    service:      get_name_list
+    object_class: named_variable
+    object_scope: (absent)
+    domain:       (absent)
+    continue_after: (absent)
+  Response:
+    pdu_type:     confirmed_response
+    invoke_id:    0
+    identifiers:  (empty or absent)
+    more_follows: (absent)
+```
+
+> **说明**：该 pcap 中的 GetNameList 请求类型为 `named_variable` + `vmdSpecific`。
+> 响应为最小化 PDU（仅含 invokeID，无 service response body），因此 identifiers 和 more_follows 均为空。
+> `object_scope` 字段在日志中缺失，是因为当前 `parse_get_name_list_request` 解析了 `vmdSpecific` 并设置了 `object_scope = "vmd_specific"`，但需确认日志输出中是否正确包含。
+
+#### 7.2.5 验证 checklist
+
+```bash
+echo "=== GetNameList pcap 验证 ==="
+
+# 1. 无 malformed 事件
+mal=$(grep -c 'malformed_data' /tmp/mms_test_gnl/eve.json 2>/dev/null || echo 0)
+echo "[$([ "$mal" -eq 0 ] && echo PASS || echo FAIL)] malformed_data 计数 = $mal (预期 0)"
+
+# 2. 检出 get_name_list 服务
+gnl=$(grep -c '"service":"get_name_list"' /tmp/mms_test_gnl/eve.json 2>/dev/null || echo 0)
+echo "[$([ "$gnl" -ge 1 ] && echo PASS || echo FAIL)] get_name_list 服务检出 = $gnl 次 (预期 >= 1)"
+
+# 3. object_class 为 named_variable
+nv=$(grep -c '"object_class":"named_variable"' /tmp/mms_test_gnl/eve.json 2>/dev/null || echo 0)
+echo "[$([ "$nv" -ge 1 ] && echo PASS || echo FAIL)] object_class=named_variable 检出 = $nv 次 (预期 >= 1)"
+
+# 4. 有 initiate_request 和 conclude_request（完整 MMS 会话生命周期）
+init=$(grep -c '"pdu_type":"initiate_request"' /tmp/mms_test_gnl/eve.json 2>/dev/null || echo 0)
+conc=$(grep -c '"pdu_type":"conclude_request"' /tmp/mms_test_gnl/eve.json 2>/dev/null || echo 0)
+echo "[$([ "$init" -ge 1 ] && echo PASS || echo FAIL)] initiate_request 检出 = $init 次 (预期 >= 1)"
+echo "[$([ "$conc" -ge 1 ] && echo PASS || echo FAIL)] conclude_request 检出 = $conc 次 (预期 >= 1)"
+```
+
+预期输出：
+
+```
+=== GetNameList pcap 验证 ===
+[PASS] malformed_data 计数 = 0 (预期 0)
+[PASS] get_name_list 服务检出 = 1 次 (预期 >= 1)
+[PASS] object_class=named_variable 检出 = 1 次 (预期 >= 1)
+[PASS] initiate_request 检出 = 1 次 (预期 >= 1)
+[PASS] conclude_request 检出 = 1 次 (预期 >= 1)
+```
+
+### 7.3 Rust 单元测试 — 覆盖全部三种查询类型
+
+pcap 文件仅包含 `named_variable` (objectClass=0) 一种类型。**另外两种类型（domain、named_variable_list）通过 Rust 单元测试覆盖**，位于 `rust/src/iec61850mms/mms_pdu.rs` 的 `#[cfg(test)]` 模块中。
+
+#### 7.3.1 三种类型对应的单元测试
+
+| 查询类型 | objectClass | 测试函数 | 测试内容 |
+|---------|------------|---------|---------|
+| 列出逻辑设备 | `domain` (9) | `test_get_name_list_request_vmd_specific` | objectClass=9 + vmdSpecific，验证解析为 `"domain"` |
+| 列出变量 | `named_variable` (0) | `test_get_name_list_request_domain_specific_with_continue_after` | objectClass=0 + domainSpecific("LD1") + continueAfter("Var100") |
+| 列出数据集 | `named_variable_list` (2) | `test_get_name_list_request_aa_specific` | objectClass=2 + aaSpecific，验证解析为 `"named_variable_list"` |
+
+另有 3 个 Response 侧测试：
+
+| 测试函数 | 测试内容 |
+|---------|---------|
+| `test_get_name_list_response_multiple_identifiers` | 返回 3 个标识符 + moreFollows=true |
+| `test_get_name_list_response_empty_list` | 空列表 + moreFollows=false |
+| `test_get_name_list_response_truncate_at_64` | 超过 64 条时截断保护 |
+
+#### 7.3.2 运行单元测试
+
+```bash
+cd /home/work/suricata-8.0.4-study/rust && cargo test --lib iec61850mms -- get_name_list
+```
+
+预期输出：
+
+```
+running 6 tests
+test iec61850mms::mms_pdu::tests::test_get_name_list_request_aa_specific ... ok
+test iec61850mms::mms_pdu::tests::test_get_name_list_request_domain_specific_with_continue_after ... ok
+test iec61850mms::mms_pdu::tests::test_get_name_list_request_vmd_specific ... ok
+test iec61850mms::mms_pdu::tests::test_get_name_list_response_empty_list ... ok
+test iec61850mms::mms_pdu::tests::test_get_name_list_response_multiple_identifiers ... ok
+test iec61850mms::mms_pdu::tests::test_get_name_list_response_truncate_at_64 ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored
+```
+
+#### 7.3.3 各测试用例的报文字节对照
+
+**测试 1：domain (9) + vmdSpecific** — 列出逻辑设备
+
+```
+构造的 MMS PDU 字节：
+A0 0E 02 01 01 A1 09 A0 03 80 01 09 A1 02 80 00
+                                  ↑↑
+                              objectClass = 9 → "domain"
+
+验证断言：
+  info.object_class  == Some("domain")
+  info.object_scope  == Some("vmd_specific")
+  info.domain_id     == None
+  info.continue_after == None
+```
+
+**测试 2：named_variable (0) + domainSpecific("LD1") + continueAfter("Var100")** — 列出变量
+
+```
+构造的 MMS PDU 字节：
+A0 19 02 01 02 A1 14 A0 03 80 01 00 A1 05 81 03 4C 44 31 82 06 56 61 72 31 30 30
+                              ↑↑          ↑↑↑↑↑↑↑↑↑       ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
+                      objectClass=0    domainSpecific     continueAfter="Var100"
+                      "named_variable"   "LD1"
+
+验证断言：
+  info.object_class   == Some("named_variable")
+  info.object_scope   == Some("domain_specific")
+  info.domain_id      == Some("LD1")
+  info.continue_after == Some("Var100")
+```
+
+**测试 3：named_variable_list (2) + aaSpecific** — 列出数据集
+
+```
+构造的 MMS PDU 字节：
+A0 0E 02 01 03 A1 09 A0 03 80 01 02 A1 02 82 00
+                              ↑↑          ↑↑↑↑
+                      objectClass=2    aaSpecific (NULL)
+                      "named_variable_list"
+
+验证断言：
+  info.object_class  == Some("named_variable_list")
+  info.object_scope  == Some("aa_specific")
+  info.domain_id     == None
+```
+
+### 7.4 覆盖度总结
+
+| 验证维度 | pcap 集成测试 | Rust 单元测试 |
+|---------|-------------|-------------|
+| objectClass = `named_variable` (0) | ✅ iec61850_get_name_list.pcap | ✅ test_..._domain_specific_with_continue_after |
+| objectClass = `named_variable_list` (2) | ❌ 无对应 pcap | ✅ test_..._aa_specific |
+| objectClass = `domain` (9) | ❌ 无对应 pcap | ✅ test_..._vmd_specific |
+| objectScope = vmdSpecific | ✅ pcap 中使用 | ✅ test_..._vmd_specific |
+| objectScope = domainSpecific | ❌ 无对应 pcap | ✅ test_..._domain_specific_with_continue_after |
+| objectScope = aaSpecific | ❌ 无对应 pcap | ✅ test_..._aa_specific |
+| continueAfter 分页 | ❌ 无对应 pcap | ✅ test_..._domain_specific_with_continue_after |
+| Response: 多标识符 + moreFollows | ❌ pcap 响应为最小化 PDU | ✅ test_..._multiple_identifiers |
+| Response: 空列表 + moreFollows=false | ❌ | ✅ test_..._empty_list |
+| Response: 超 64 条截断 | ❌ | ✅ test_..._truncate_at_64 |
+
+**结论**：
+- **pcap 集成测试**验证了解析器在完整协议栈（TCP → TPKT → COTP → Session → Presentation → MMS）下对 `named_variable` + `vmdSpecific` 的端到端处理能力。
+- **Rust 单元测试**补充覆盖了 `domain`、`named_variable_list` 以及 `domainSpecific`、`aaSpecific`、`continueAfter` 等 pcap 中未出现的场景。
+- 若后续获取到包含 domain/variableList 查询的真实 pcap，建议补充集成测试用例。
+
+## 8. 深度解析功能专项测试
+
+本节覆盖四种已实现深度解析的 MMS 服务类型，验证解析器不仅能识别服务类型，还能正确提取内部字段并输出到 EVE JSON 日志。
+
+### 8.1 测试范围
+
+| 服务类型 | Request 深度解析字段 | Response 深度解析字段 | pcap 来源 |
+|---------|---------------------|---------------------|-----------|
+| GetVariableAccessAttributes | object_name (scope/domain/item) | （当前 pcap 响应为最小化 PDU） | iec61850_get_variable_access_attributes.pcap |
+| GetNameList | object_class, object_scope, domain, continue_after | identifiers[], more_follows | iec61850_get_name_list.pcap |
+| Initiate-Request/Response | local_detail, max_serv_outstanding, data_structure_nesting_level, version_number, supported_services | 同左 | iec61850_get_name_list.pcap（含 Initiate 握手） |
+| GetNamedVariableListAttributes | object_name (scope/domain/item) | mms_deletable, variable_count, variables[] | session_254_172.20.4.111_38914.pcap |
+
+### 8.2 环境准备
+
+```bash
+export SURICATA_DIR="/home/work/suricata-8.0.4-study"
+export PCAP_DIR="/home/work/iec61850_protocol_parser/pcaps_file"
+export SURICATA_YAML="$SURICATA_DIR/suricata.yaml"
+export DEEP_OUT="/tmp/mms_deep_test"
+rm -rf "$DEEP_OUT" && mkdir -p "$DEEP_OUT"
+```
+
+```bash
+GNVLA_PCAP="/tmp/test_large_12/session_254_172.20.4.111_38914.pcap"
+```
+
+### 8.3 测试一：GetVariableAccessAttributes 深度解析
+
+#### 8.3.1 运行
+
+```bash
+OUTDIR="$DEEP_OUT/gva"
+rm -rf "$OUTDIR" && mkdir -p "$OUTDIR"
+suricata -r "$PCAP_DIR/iec61850_get_variable_access_attributes.pcap" \
+    -S /dev/null -c "$SURICATA_YAML" -l "$OUTDIR" 2>/dev/null
+echo "done"
+```
+
+#### 8.3.2 提取深度解析字段
+
+```bash
+python3 learning/tests/extract_gva_details.py /tmp/mms_deep_test/gva/eve.json
+```
+
+#### 8.3.3 预期输出
+
+```
+=== GetVariableAccessAttributes Transaction ===
+  Request:
+    invoke_id: 0
+    service:   get_variable_access_attributes
+    variable.scope:  vmd_specific
+    variable.domain: (absent)
+    variable.item:   mu
+  Response:
+    invoke_id: 0
+    service:   unknown
+```
+
+> **说明**：该 pcap 的 Response 为最小化 PDU（仅含 invokeID），因此 service 为 `unknown`，无深度字段。Request 侧成功提取了 `variable` 对象，scope 为 `vmd_specific`，item 为 `mu`。
+
+#### 8.3.4 验证 checklist
+
+```bash
+echo "=== GetVariableAccessAttributes 深度解析验证 ==="
+OUTDIR="/tmp/mms_deep_test/gva"
+
+# 1. 无 malformed
+mal=$(grep -c 'malformed_data' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$mal" -eq 0 ] && echo PASS || echo FAIL)] malformed = $mal (预期 0)"
+
+# 2. 服务类型正确
+svc=$(grep -c '"service":"get_variable_access_attributes"' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$svc" -ge 1 ] && echo PASS || echo FAIL)] service 检出 = $svc (预期 >= 1)"
+
+# 3. variable.scope 深度字段存在
+scope=$(grep -c '"scope":"vmd_specific"' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$scope" -ge 1 ] && echo PASS || echo FAIL)] variable.scope=vmd_specific 检出 = $scope (预期 >= 1)"
+
+# 4. variable.item 深度字段正确
+item=$(grep -c '"item":"mu"' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$item" -ge 1 ] && echo PASS || echo FAIL)] variable.item=mu 检出 = $item (预期 >= 1)"
+```
+
+预期输出：
+
+```
+=== GetVariableAccessAttributes 深度解析验证 ===
+[PASS] malformed = 0 (预期 0)
+[PASS] service 检出 = 1 (预期 >= 1)
+[PASS] variable.scope=vmd_specific 检出 = 1 (预期 >= 1)
+[PASS] variable.item=mu 检出 = 1 (预期 >= 1)
+```
+
+#### 8.3.5 Rust 单元测试
+
+```bash
+cd "$SURICATA_DIR/rust" && cargo test --lib iec61850mms -- get_var_access_attr
+```
+
+预期输出：
+
+```
+running 3 tests
+test iec61850mms::mms_pdu::tests::test_get_var_access_attr_aa_specific ... ok
+test iec61850mms::mms_pdu::tests::test_get_var_access_attr_domain_specific ... ok
+test iec61850mms::mms_pdu::tests::test_get_var_access_attr_vmd_specific ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored
+```
+
+覆盖 ObjectName 的三种变体（vmd-specific、domain-specific、aa-specific）。
+
+### 8.4 测试二：GetNameList 深度解析
+
+> 本节为第 7 节的补充，聚焦于 Request/Response 内部字段的深度验证。
+
+#### 8.4.1 运行
+
+```bash
+OUTDIR="$DEEP_OUT/gnl"
+rm -rf "$OUTDIR" && mkdir -p "$OUTDIR"
+suricata -r "$PCAP_DIR/iec61850_get_name_list.pcap" \
+    -S /dev/null -c "$SURICATA_YAML" -l "$OUTDIR" 2>/dev/null
+echo "done"
+```
+
+#### 8.4.2 提取深度解析字段
+
+```bash
+python3 learning/tests/extract_gnl_details.py /tmp/mms_deep_test/gnl/eve.json
+```
+
+#### 8.4.3 预期输出
+
+```
+=== GetNameList Transaction ===
+  Request:
+    invoke_id:      0
+    object_class:   named_variable
+    object_scope:   (absent)
+    domain:         (absent)
+    continue_after: (absent)
+  Response:
+    invoke_id:    0
+    identifiers:  (empty or absent)
+    more_follows: (absent)
+```
+
+> **说明**：该 pcap 中 Request 的 object_class 为 `named_variable`（objectClass=0），Response 为最小化 PDU。
+
+#### 8.4.4 验证 checklist
+
+```bash
+echo "=== GetNameList 深度解析验证 ==="
+OUTDIR="/tmp/mms_deep_test/gnl"
+
+# 1. 无 malformed
+mal=$(grep -c 'malformed_data' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$mal" -eq 0 ] && echo PASS || echo FAIL)] malformed = $mal (预期 0)"
+
+# 2. object_class 深度字段
+oc=$(grep -c '"object_class":"named_variable"' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$oc" -ge 1 ] && echo PASS || echo FAIL)] object_class=named_variable 检出 = $oc (预期 >= 1)"
+
+# 3. 服务类型
+svc=$(grep -c '"service":"get_name_list"' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$svc" -ge 1 ] && echo PASS || echo FAIL)] service=get_name_list 检出 = $svc (预期 >= 1)"
+```
+
+预期输出：
+
+```
+=== GetNameList 深度解析验证 ===
+[PASS] malformed = 0 (预期 0)
+[PASS] object_class=named_variable 检出 = 1 (预期 >= 1)
+[PASS] service=get_name_list 检出 = 1 (预期 >= 1)
+```
+
+#### 8.4.5 Rust 单元测试
+
+```bash
+cd "$SURICATA_DIR/rust" && cargo test --lib iec61850mms -- get_name_list
+```
+
+预期输出：
+
+```
+running 6 tests
+test iec61850mms::mms_pdu::tests::test_get_name_list_request_aa_specific ... ok
+test iec61850mms::mms_pdu::tests::test_get_name_list_request_domain_specific_with_continue_after ... ok
+test iec61850mms::mms_pdu::tests::test_get_name_list_request_vmd_specific ... ok
+test iec61850mms::mms_pdu::tests::test_get_name_list_response_empty_list ... ok
+test iec61850mms::mms_pdu::tests::test_get_name_list_response_multiple_identifiers ... ok
+test iec61850mms::mms_pdu::tests::test_get_name_list_response_truncate_at_64 ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored
+```
+
+覆盖三种 objectClass（domain/named_variable/named_variable_list）、三种 objectScope、continueAfter 分页、Response 多标识符/空列表/64 条截断。
+
+### 8.5 测试三：Initiate-Request/Response 深度解析
+
+#### 8.5.1 运行
+
+复用 8.4 的输出（同一 pcap 包含 Initiate 握手）。
+
+#### 8.5.2 提取 Initiate 深度解析字段
+
+```bash
+python3 learning/tests/extract_initiate_details.py /tmp/mms_deep_test/gnl/eve.json
+```
+
+#### 8.5.3 预期输出
+
+```
+initiate_request ===
+  local_detail: (absent)
+  max_serv_outstanding: (absent)
+  data_structure_nesting_level: (absent)
+  version_number: (absent)
+  supported_services: (absent)
+initiate_response ===
+  local_detail: (absent)
+  max_serv_outstanding: (absent)
+  data_structure_nesting_level: (absent)
+  version_number: (absent)
+  supported_services: (absent)
+```
+
+> **说明**：当前可用 pcap 中 Initiate PDU 经 Session/Presentation 层解封后被正确识别为 `initiate_request`/`initiate_response`，但内部详细参数字段在该 pcap 中未被携带（最小化 PDU）。Initiate 参数的深度解析能力通过 Rust 单元测试验证。
+
+#### 8.5.4 验证 checklist
+
+```bash
+echo "=== Initiate 深度解析验证 ==="
+OUTDIR="/tmp/mms_deep_test/gnl"
+
+# 1. initiate_request 可检出
+ir=$(grep -c '"pdu_type":"initiate_request"' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$ir" -ge 1 ] && echo PASS || echo FAIL)] initiate_request 检出 = $ir (预期 >= 1)"
+
+# 2. initiate_response 可检出
+is=$(grep -c '"pdu_type":"initiate_response"' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$is" -ge 1 ] && echo PASS || echo FAIL)] initiate_response 检出 = $is (预期 >= 1)"
+```
+
+预期输出：
+
+```
+=== Initiate 深度解析验证 ===
+[PASS] initiate_request 检出 = 1 (预期 >= 1)
+[PASS] initiate_response 检出 = 1 (预期 >= 1)
+```
+
+#### 8.5.5 Rust 单元测试
+
+```bash
+cd "$SURICATA_DIR/rust" && cargo test --lib iec61850mms -- initiate
+```
+
+预期输出：
+
+```
+running 5 tests
+test iec61850mms::mms_pdu::tests::test_parse_initiate_detail_all_fields ... ok
+test iec61850mms::mms_pdu::tests::test_parse_initiate_detail_empty ... ok
+test iec61850mms::mms_pdu::tests::test_parse_initiate_detail_partial ... ok
+test iec61850mms::mms_pdu::tests::test_parse_initiate_request ... ok
+test iec61850mms::mms_pdu::tests::test_parse_initiate_response ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored
+```
+
+单元测试覆盖：
+- `test_parse_initiate_detail_all_fields`：完整参数（local_detail=65000, max_serv_outstanding=10, nesting_level=4, version=1, supported_services 位图）
+- `test_parse_initiate_detail_partial`：仅部分参数存在
+- `test_parse_initiate_detail_empty`：空内容
+- `test_parse_initiate_request` / `test_parse_initiate_response`：完整 PDU 级别解析
+
+### 8.6 测试四：GetNamedVariableListAttributes 深度解析
+
+#### 8.6.1 运行
+
+```bash
+OUTDIR="$DEEP_OUT/gnvla"
+rm -rf "$OUTDIR" && mkdir -p "$OUTDIR"
+suricata -r "$GNVLA_PCAP" \
+    -S /dev/null -c "$SURICATA_YAML" -l "$OUTDIR" 2>/dev/null
+echo "done"
+```
+
+#### 8.6.2 提取深度解析字段
+
+```bash
+python3 learning/tests/extract_gnvla_details.py /tmp/mms_deep_test/gnvla/eve.json
+```
+
+#### 8.6.3 预期输出
+
+```
+=== GetNamedVariableListAttributes Transaction ===
+  Request:
+    invoke_id: 1503081
+    object_name.scope:  domain_specific
+    object_name.domain: PQMR_1000_941
+    object_name.item:   LLN0$dsMmtr1
+  Response:
+    invoke_id:      1503081
+    mms_deletable:  False
+    variable_count: 20
+    variables (20 items):
+      [0] scope=domain_specific, domain=PQMR_1000_941, item=MMTR1$MX$SupWh
+      [1] scope=domain_specific, domain=PQMR_1000_941, item=MMTR1$MX$SupVArh
+      [2] scope=domain_specific, domain=PQMR_1000_941, item=MMTR1$MX$DmdWh
+      [3] scope=domain_specific, domain=PQMR_1000_941, item=MMTR1$MX$DmdVArh
+      [4] scope=domain_specific, domain=PQMR_1000_941, item=MMTR2$MX$SupWh
+      ... (15 more)
+```
+
+> **说明**：Request 成功提取了数据集名称 `LLN0$dsMmtr1`（domain=`PQMR_1000_941`）。Response 提取了 `mms_deletable=false` 和完整的 20 个变量列表，包括 MMTR1~MMTR5 的 SupWh/SupVArh/DmdWh/DmdVArh 共 20 个电能量测量属性。
+
+#### 8.6.4 验证 checklist
+
+```bash
+echo "=== GetNamedVariableListAttributes 深度解析验证 ==="
+OUTDIR="/tmp/mms_deep_test/gnvla"
+
+# 1. 无 malformed
+mal=$(grep -c 'malformed_data' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$mal" -eq 0 ] && echo PASS || echo FAIL)] malformed = $mal (预期 0)"
+
+# 2. 服务类型
+svc=$(grep -c '"service":"get_named_variable_list_attributes"' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$svc" -ge 1 ] && echo PASS || echo FAIL)] service 检出 = $svc (预期 >= 1)"
+
+# 3. Request object_name 深度字段
+domain=$(grep -c '"domain":"PQMR_1000_941"' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$domain" -ge 1 ] && echo PASS || echo FAIL)] domain=PQMR_1000_941 检出 = $domain (预期 >= 1)"
+
+item=$(grep -c '"item":"LLN0\$dsMmtr1"' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$item" -ge 1 ] && echo PASS || echo FAIL)] item=LLN0\$dsMmtr1 检出 = $item (预期 >= 1)"
+
+# 4. Response mms_deletable 深度字段
+del=$(grep -c '"mms_deletable":false' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$del" -ge 1 ] && echo PASS || echo FAIL)] mms_deletable=false 检出 = $del (预期 >= 1)"
+
+# 5. Response variable_count 深度字段
+vc=$(grep -c '"variable_count":20' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$vc" -ge 1 ] && echo PASS || echo FAIL)] variable_count=20 检出 = $vc (预期 >= 1)"
+
+# 6. Response variables 数组中的具体变量
+v1=$(grep -c '"item":"MMTR1\$MX\$SupWh"' "$OUTDIR/eve.json" 2>/dev/null || echo 0)
+echo "[$([ "$v1" -ge 1 ] && echo PASS || echo FAIL)] variable MMTR1\$MX\$SupWh 检出 = $v1 (预期 >= 1)"
+```
+
+预期输出：
+
+```
+=== GetNamedVariableListAttributes 深度解析验证 ===
+[PASS] malformed = 0 (预期 0)
+[PASS] service 检出 = 1 (预期 >= 1)
+[PASS] domain=PQMR_1000_941 检出 = 1 (预期 >= 1)
+[PASS] item=LLN0$dsMmtr1 检出 = 1 (预期 >= 1)
+[PASS] mms_deletable=false 检出 = 1 (预期 >= 1)
+[PASS] variable_count=20 检出 = 1 (预期 >= 1)
+[PASS] variable MMTR1$MX$SupWh 检出 = 1 (预期 >= 1)
+```
+
+#### 8.6.5 Rust 单元测试
+
+```bash
+cd "$SURICATA_DIR/rust" && cargo test --lib iec61850mms -- get_named_var_list_attr
+```
+
+预期输出：
+
+```
+running 3 tests
+test iec61850mms::mms_pdu::tests::test_parse_get_named_var_list_attr_request_domain_specific ... ok
+test iec61850mms::mms_pdu::tests::test_parse_get_named_var_list_attr_request_vmd_specific ... ok
+test iec61850mms::mms_pdu::tests::test_parse_get_named_var_list_attr_response ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored
+```
+
+覆盖：Request 的 domain-specific 和 vmd-specific 两种 ObjectName、Response 的 mmsDeletable + 多变量列表解析（上限 32 条截断）。
+
+### 8.7 一键自动化深度解析测试脚本
+
+```bash
+cat > /tmp/run_deep_parse_tests.sh << 'SCRIPT_EOF'
+#!/bin/bash
+
+SURICATA_DIR="${SURICATA_DIR:-/home/work/suricata-8.0.4-study}"
+PCAP_DIR="${PCAP_DIR:-/home/work/iec61850_protocol_parser/pcaps_file}"
+SURICATA_YAML="${SURICATA_YAML:-$SURICATA_DIR/suricata.yaml}"
+DEEP_OUT="/tmp/mms_deep_test"
+GNVLA_PCAP="/tmp/test_large_12/session_254_172.20.4.111_38914.pcap"
+
+PASS=0; FAIL=0
+
+check() {
+    local desc="$1"; shift
+    if "$@" 2>/dev/null; then
+        echo "  [PASS] $desc"; PASS=$((PASS + 1))
+    else
+        echo "  [FAIL] $desc"; FAIL=$((FAIL + 1))
+    fi
+}
+
+rm -rf "$DEEP_OUT" && mkdir -p "$DEEP_OUT"
+
+# === 运行 pcap ===
+echo "=== Running pcaps ==="
+for name_pcap in \
+    "gva:$PCAP_DIR/iec61850_get_variable_access_attributes.pcap" \
+    "gnl:$PCAP_DIR/iec61850_get_name_list.pcap" \
+    "gnvla:$GNVLA_PCAP"; do
+    name="${name_pcap%%:*}"; pcap="${name_pcap#*:}"
+    outdir="$DEEP_OUT/$name"; rm -rf "$outdir" && mkdir -p "$outdir"
+    if [ -f "$pcap" ]; then
+        suricata -r "$pcap" -S /dev/null -c "$SURICATA_YAML" -l "$outdir" 2>/dev/null
+        echo "  done: $name"
+    else
+        echo "  SKIP: $name (pcap not found: $pcap)"
+    fi
+done
+
+# === 验证 ===
+echo ""; echo "=== Deep Parsing Verification ==="
+
+echo ""; echo "[GetVariableAccessAttributes]"
+D="$DEEP_OUT/gva"
+mal=$(grep -c 'malformed_data' "$D/eve.json" 2>/dev/null || true)
+check "malformed=0" test "${mal:-0}" -eq 0
+check "service=get_variable_access_attributes" grep -q '"service":"get_variable_access_attributes"' "$D/eve.json"
+check "variable.scope=vmd_specific" grep -q '"scope":"vmd_specific"' "$D/eve.json"
+check "variable.item=mu" grep -q '"item":"mu"' "$D/eve.json"
+
+echo ""; echo "[GetNameList]"
+D="$DEEP_OUT/gnl"
+mal=$(grep -c 'malformed_data' "$D/eve.json" 2>/dev/null || true)
+check "malformed=0" test "${mal:-0}" -eq 0
+check "service=get_name_list" grep -q '"service":"get_name_list"' "$D/eve.json"
+check "object_class=named_variable" grep -q '"object_class":"named_variable"' "$D/eve.json"
+
+echo ""; echo "[Initiate-Request/Response]"
+D="$DEEP_OUT/gnl"
+check "initiate_request detected" grep -q '"pdu_type":"initiate_request"' "$D/eve.json"
+check "initiate_response detected" grep -q '"pdu_type":"initiate_response"' "$D/eve.json"
+
+echo ""; echo "[GetNamedVariableListAttributes]"
+D="$DEEP_OUT/gnvla"
+if [ -f "$D/eve.json" ]; then
+    mal=$(grep -c 'malformed_data' "$D/eve.json" 2>/dev/null || true)
+    check "malformed=0" test "${mal:-0}" -eq 0
+    check "service=get_named_variable_list_attributes" grep -q '"service":"get_named_variable_list_attributes"' "$D/eve.json"
+    check "request domain=PQMR_1000_941" grep -q '"domain":"PQMR_1000_941"' "$D/eve.json"
+    check "request item=LLN0\$dsMmtr1" grep -q '"item":"LLN0\$dsMmtr1"' "$D/eve.json"
+    check "response mms_deletable=false" grep -q '"mms_deletable":false' "$D/eve.json"
+    check "response variable_count=20" grep -q '"variable_count":20' "$D/eve.json"
+    check "response variable MMTR1\$MX\$SupWh" grep -q '"item":"MMTR1\$MX\$SupWh"' "$D/eve.json"
+else
+    echo "  [SKIP] pcap not available"
+fi
+
+# === Rust 单元测试 ===
+echo ""; echo "[Rust Unit Tests]"
+cd "$SURICATA_DIR/rust"
+for filter in "get_var_access_attr" "get_name_list" "initiate" "get_named_var_list_attr"; do
+    output=$(cargo test --lib iec61850mms -- "$filter" 2>&1)
+    result_line=$(echo "$output" | grep "^test result:")
+    passed=$(echo "$result_line" | grep -oP '\d+ passed' | grep -oP '\d+' || echo 0)
+    failed=$(echo "$result_line" | grep -oP '\d+ failed' | grep -oP '\d+' || echo 0)
+    check "cargo test -- $filter: ${passed:-0} passed, ${failed:-0} failed" test "${failed:-0}" -eq 0
+done
+
+echo ""; echo "=== Summary ==="
+echo "PASSED: $PASS"; echo "FAILED: $FAIL"
+[ "$FAIL" -eq 0 ] && echo "ALL DEEP PARSING TESTS PASSED" && exit 0
+echo "SOME TESTS FAILED" && exit 1
+SCRIPT_EOF
+chmod +x /tmp/run_deep_parse_tests.sh
+echo "脚本已生成: /tmp/run_deep_parse_tests.sh"
+```
+
+执行：
+
+```bash
+/tmp/run_deep_parse_tests.sh
+```
+
+预期输出（末尾）：
+
+```
+=== Summary ===
+PASSED: 20
+FAILED: 0
+ALL DEEP PARSING TESTS PASSED
+```
+
+### 8.8 深度解析覆盖度总结
+
+| 服务类型 | pcap 集成测试 | Rust 单元测试 | 深度字段覆盖 |
+|---------|-------------|-------------|------------|
+| GetVariableAccessAttributes Request | ✅ vmd_specific | ✅ vmd/domain/aa 三种 | scope, domain, item |
+| GetVariableAccessAttributes Response | ❌ 最小化 PDU | ❌ 暂未实现 | - |
+| GetNameList Request | ✅ named_variable | ✅ domain/named_variable/named_variable_list 三种 | object_class, object_scope, domain, continue_after |
+| GetNameList Response | ❌ 最小化 PDU | ✅ 多标识符/空列表/64条截断 | identifiers[], more_follows |
+| Initiate-Request | ✅ PDU 类型识别 | ✅ 全字段/部分字段/空内容 | local_detail, max_serv_outstanding, nesting_level, version, supported_services |
+| Initiate-Response | ✅ PDU 类型识别 | ✅ 同上 | 同上 |
+| GetNamedVarListAttr Request | ✅ domain_specific | ✅ domain/vmd 两种 | scope, domain, item |
+| GetNamedVarListAttr Response | ✅ 完整 20 变量 | ✅ mmsDeletable + 多变量列表 | mms_deletable, variable_count, variables[] |

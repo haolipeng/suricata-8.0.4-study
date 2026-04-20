@@ -340,7 +340,7 @@ alert http any any -> any any (
 
 `state` 选项同时兼具 `load`（启动时加载）和 `save`（退出时保存）的功能。
 
-### 在 suricata.yaml 中预定��
+### 在 suricata.yaml 中预定义
 
 ```yaml
 datasets:

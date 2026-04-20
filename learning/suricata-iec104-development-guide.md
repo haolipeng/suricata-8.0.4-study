@@ -770,7 +770,7 @@ OutputRegisterTxSubModule         →  注册 EVE 子模块（驱动层）
 
 ### 8.3 Rust 生命周期错误
 
-**���象**：`parse_information_element` 等函数编译报错 `missing lifetime specifier`。
+**现象**：`parse_information_element` 等函数编译报错 `missing lifetime specifier`。
 
 **原因**：函数有多个引用参数 `(i: &[u8], type_id: &TypeId)` 时，Rust 的生命周期省略规则无法推断返回值 `IResult<&[u8], ...>` 中的 `&[u8]` 应该关联哪个输入参数的生命周期。
 
