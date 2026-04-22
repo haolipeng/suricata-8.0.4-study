@@ -21,7 +21,7 @@ export SURICATA_YAML="$SURICATA_DIR/suricata.yaml"
 ls "$PCAP_DIR"/*.pcap | wc -l
 ```
 
-预期输出：`21`
+预期输出：`29`
 
 完整 pcap 列表：
 
@@ -48,6 +48,14 @@ ls "$PCAP_DIR"/*.pcap | wc -l
 | MMS 直连（扩展服务） | `mms-resetRequest.pcap` | Reset (tag=43) |
 | MMS 直连（扩展服务） | `mms-relinquishControl.pcap` | RelinquishControl (tag=20) |
 | MMS 直连（扩展服务） | `mms-takeControl.pcap` | TakeControl (tag=19) |
+| MMS 直连 | `cancel_response.pcap` | CancelResponse PDU |
+| MMS 直连 | `conclude_error.pcap` | ConcludeError PDU |
+| MMS 直连 | `get_name_list_full_response.pcap` | GetNameList 完整响应（含 identifiers） |
+| IEC 61850 完整栈 | `iec61850_full_session.pcap` | 完整 MMS 会话（多种服务） |
+| MMS 直连 | `initiate_error.pcap` | InitiateError PDU |
+| MMS 直连 | `mms.pcap` | MMS 通用（Read + GetVariableAccessAttributes） |
+| MMS 直连 | `read_response_with_data.pcap` | Read 响应含数据值 |
+| MMS 直连 | `unconfirmed_information_report.pcap` | InformationReport（未确认 PDU） |
 
 ### 1.3 编译与安装
 
@@ -66,7 +74,7 @@ cd "$SURICATA_DIR/rust" && cargo test --lib iec61850mms
 预期输出（关注最后一行）：
 
 ```
-test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 552 filtered out
+test result: ok. 169 passed; 0 failed; 0 ignored; 0 measured; 552 filtered out
 ```
 
 如果出现 failed > 0，停止后续测试，先排查单元测试失败原因。
@@ -88,7 +96,7 @@ done
 echo "=== ALL DONE ==="
 ```
 
-预期：逐行输出 `done: <pcap名>`，最后输出 `=== ALL DONE ===`，共 21 个。
+预期：逐行输出 `done: <pcap名>`，最后输出 `=== ALL DONE ===`，共 29 个。
 
 ### 2.2 提取汇总结果
 
@@ -108,10 +116,9 @@ with open('$outdir/eve.json') as f:
         ev = json.loads(line)
         if ev.get('event_type') == 'iec61850_mms':
             mms = ev.get('iec61850_mms', {})
-            for side in ('request', 'response'):
-                s = mms.get(side, {}).get('service', '')
-                if s and s != 'unknown':
-                    svcs.add(s)
+            s = mms.get('service', '')
+            if s and s != 'unknown':
+                svcs.add(s)
 print(', '.join(sorted(svcs)) if svcs else '-')
 PYEOF
 )
@@ -135,27 +142,13 @@ with open('$outdir/eve.json') as f:
         ev = json.loads(line)
         if ev.get('event_type') == 'iec61850_mms':
             mms = ev.get('iec61850_mms', {})
-            req = mms.get('request', {})
-            resp = mms.get('response', {})
-            parts = []
-            if req:
-                pdu = req.get('pdu_type', '')
-                svc = req.get('service', '')
-                s = 'req: pdu_type=' + pdu
-                if svc:
-                    s += ', service=' + svc
-                parts.append(s)
-            if resp:
-                pdu = resp.get('pdu_type', '')
-                svc = resp.get('service', '')
-                s = 'resp: pdu_type=' + pdu
-                if svc:
-                    s += ', service=' + svc
-                parts.append(s)
-            if parts:
-                print('  TX: ' + ' | '.join(parts))
-            elif not req and not resp:
-                print('  TX: (empty - COTP connection)')
+            direction = mms.get('direction', '')
+            pdu_type = mms.get('pdu_type', '')
+            service = mms.get('service', '')
+            s = direction + ': pdu_type=' + pdu_type
+            if service:
+                s += ', service=' + service
+            print('  TX: ' + s)
         elif ev.get('event_type') == 'anomaly' and 'malformed' in line:
             print('  ANOMALY: malformed_data tx_id=%s' % ev.get('tx_id'))
 PYEOF
@@ -164,6 +157,8 @@ done
 ```
 
 将每个 pcap 的输出与 3.2 节的事务详情基准逐一对比。
+
+> **注意**：当前事务模型中每个 MMS PDU 是独立事务，JSON 结构为 `{"iec61850_mms": {"direction": "request"|"response", "pdu_type": "...", "service": "..."}}`，不再是 request/response 配对格式。
 
 ## 3. 预期结果基准
 
@@ -192,6 +187,14 @@ done
 | mms-resetRequest | 0 | reset | 多字节标签 tag=43 |
 | mms-relinquishControl | 0 | relinquish_control, take_control | tag=20 |
 | mms-takeControl | 0 | relinquish_control, take_control | tag=19 |
+| cancel_response | 0 | - | CancelResponse PDU |
+| conclude_error | 0 | - | ConcludeError PDU |
+| get_name_list_full_response | 0 | get_name_list | GetNameList 完整响应 |
+| iec61850_full_session | 0 | get_named_variable_list_attributes, get_variable_access_attributes | 完整 MMS 会话 |
+| initiate_error | 0 | - | InitiateError PDU |
+| mms | 0 | get_variable_access_attributes, read | MMS 通用 |
+| read_response_with_data | 0 | read | Read 响应含数据值 |
+| unconfirmed_information_report | 0 | information_report | 未确认 PDU |
 
 > **关于 mms-confirmedRequestPDU malformed=1 的说明**：该 pcap 由测试工具生成，服务端响应帧中包含无法识别的数据格式。Wireshark/tshark 也无法解析该帧。此 malformed 为 pcap 数据质量问题，非解析器缺陷。
 
@@ -199,45 +202,56 @@ done
 
 将 2.3 节的实际输出与以下基准逐一对比。每个 pcap 的输出必须**完全一致**（包括行数和顺序）。
 
+> **注意**：当前事务模型中每个 MMS PDU 是独立事务，每条 EVE JSON 输出格式为 `direction: pdu_type=..., service=...`，不再是 request/response 配对格式。
+
 #### iec61850_* 系列（Session/Presentation 完整栈）
 
 **iec61850_get_name_list**
 ```
-TX: resp: pdu_type=initiate_response
-TX: req: pdu_type=confirmed_request, service=get_name_list | resp: pdu_type=confirmed_response, service=unknown
-TX: req: pdu_type=conclude_request
-TX: req: pdu_type=initiate_request | resp: pdu_type=confirmed_response, service=unknown
+TX: request: pdu_type=initiate_request
+TX: response: pdu_type=initiate_response
+TX: request: pdu_type=confirmed_request, service=get_name_list
+TX: response: pdu_type=confirmed_response, service=unknown
+TX: request: pdu_type=conclude_request
+TX: response: pdu_type=confirmed_response, service=unknown
 ```
 
 **iec61850_get_variable_access_attributes**
 ```
-TX: resp: pdu_type=initiate_response
-TX: req: pdu_type=confirmed_request, service=get_variable_access_attributes | resp: pdu_type=confirmed_response, service=unknown
-TX: req: pdu_type=conclude_request
-TX: req: pdu_type=initiate_request | resp: pdu_type=confirmed_response, service=unknown
+TX: request: pdu_type=initiate_request
+TX: response: pdu_type=initiate_response
+TX: request: pdu_type=confirmed_request, service=get_variable_access_attributes
+TX: response: pdu_type=confirmed_response, service=unknown
+TX: request: pdu_type=conclude_request
+TX: response: pdu_type=confirmed_response, service=unknown
 ```
 
 **iec61850_read**
 ```
-TX: resp: pdu_type=initiate_response
-TX: req: pdu_type=confirmed_request, service=read | resp: pdu_type=confirmed_response, service=read
-TX: req: pdu_type=conclude_request
-TX: req: pdu_type=initiate_request | resp: pdu_type=confirmed_response, service=unknown
+TX: request: pdu_type=initiate_request
+TX: response: pdu_type=initiate_response
+TX: request: pdu_type=confirmed_request, service=read
+TX: response: pdu_type=confirmed_response, service=read
+TX: request: pdu_type=conclude_request
+TX: response: pdu_type=confirmed_response, service=unknown
 ```
 
 **iec61850_write**
 ```
-TX: resp: pdu_type=initiate_response
-TX: req: pdu_type=confirmed_request, service=write | resp: pdu_type=confirmed_response, service=unknown
-TX: req: pdu_type=conclude_request
-TX: req: pdu_type=initiate_request | resp: pdu_type=confirmed_response, service=unknown
+TX: request: pdu_type=initiate_request
+TX: response: pdu_type=initiate_response
+TX: request: pdu_type=confirmed_request, service=write
+TX: response: pdu_type=confirmed_response, service=unknown
+TX: request: pdu_type=conclude_request
+TX: response: pdu_type=confirmed_response, service=unknown
 ```
 
 **iec61850_release**
 ```
-TX: resp: pdu_type=initiate_response
-TX: req: pdu_type=conclude_request
-TX: req: pdu_type=initiate_request | resp: pdu_type=confirmed_response, service=read
+TX: request: pdu_type=initiate_request
+TX: response: pdu_type=initiate_response
+TX: request: pdu_type=conclude_request
+TX: response: pdu_type=confirmed_response, service=read
 ```
 
 > **关于 `service=unknown` 响应的说明**：部分测试 pcap 中 MMS ConfirmedResponse 仅包含 invoke_id，不含 service 标签（最小化响应）。解析器对此进行了容错处理，记录为 `unknown` 而非报 malformed。
@@ -246,138 +260,122 @@ TX: req: pdu_type=initiate_request | resp: pdu_type=confirmed_response, service=
 
 **mms-readRequest** (回归基准 - 验证修改不破坏已有功能)
 ```
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=read
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=read
 ```
 
 #### mms-* 系列（扩展服务）
 
 **mms-deleteProgramInvocation** (tag=39, 多字节标签)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=delete_program_invocation
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=delete_program_invocation
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-getAlarmSummary** (tag=63, 多字节标签)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=get_alarm_summary
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=get_alarm_summary
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-getDomainAttributes** (tag=37, 多字节标签)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=get_domain_attributes
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=get_domain_attributes
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-initiateDownloadSequence** (tag=26)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=take_control
-TX: req: pdu_type=confirmed_request, service=initiate_download_sequence
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=take_control
+TX: request: pdu_type=confirmed_request, service=initiate_download_sequence
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-initiateUploadSequence** (tag=29)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=initiate_upload_sequence
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=initiate_upload_sequence
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-terminateUploadSequence** (tag=31, 多字节标签)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=initiate_upload_sequence
-TX: req: pdu_type=confirmed_request, service=terminate_upload_sequence
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=initiate_upload_sequence
+TX: request: pdu_type=confirmed_request, service=terminate_upload_sequence
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-killRequest** (tag=44, 多字节标签)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=kill
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=kill
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-startRequest** (tag=40, 多字节标签)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=stop
-TX: req: pdu_type=confirmed_request, service=start
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=stop
+TX: request: pdu_type=confirmed_request, service=start
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-stopRequest** (tag=41, 多字节标签)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=start
-TX: req: pdu_type=confirmed_request, service=stop
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=start
+TX: request: pdu_type=confirmed_request, service=stop
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-resumeRequest** (tag=42, 多字节标签)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=resume
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=resume
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-resetRequest** (tag=43, 多字节标签)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=reset
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=reset
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-relinquishControl** (tag=20)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=take_control
-TX: req: pdu_type=confirmed_request, service=relinquish_control
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=take_control
+TX: request: pdu_type=confirmed_request, service=relinquish_control
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-takeControl** (tag=19)
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=confirmed_request, service=take_control
-TX: req: pdu_type=confirmed_request, service=relinquish_control
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=confirmed_request, service=take_control
+TX: request: pdu_type=confirmed_request, service=relinquish_control
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-cancelRequest**
 ```
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: req: pdu_type=cancel_request
+TX: request: pdu_type=initiate_request
+TX: request: pdu_type=cancel_request
+TX: request: pdu_type=conclude_request
 ```
 
 **mms-confirmedRequestPDU**
 ```
-ANOMALY: malformed_data tx_id=2
-TX: req: pdu_type=conclude_request
-TX: (empty - COTP connection)
-TX: req: pdu_type=initiate_request
-TX: (empty - COTP connection)
+TX: request: pdu_type=initiate_request
+ANOMALY: malformed_data tx_id=1
+TX: request: pdu_type=
+TX: request: pdu_type=conclude_request
 ```
 
 ## 4. 验证判定标准
@@ -385,7 +383,7 @@ TX: (empty - COTP connection)
 ### 4.1 必须通过的条件
 
 1. **编译成功**：`make -j$(nproc)` 无错误
-2. **单元测试全通过**：`cargo test --lib iec61850mms` 输出 75 passed, 0 failed
+2. **单元测试全通过**：`cargo test --lib iec61850mms` 输出 169 passed, 0 failed
 3. **iec61850_\* 系列 malformed 为 0**：所有 5 个 iec61850 pcap 的 malformed_data 计数必须为 0
 4. **回归测试通过**：`mms-readRequest` 的 malformed=0，EVE 日志中包含 `service: "read"`
 5. **扩展服务正确识别**：每个 mms-* 扩展服务 pcap 的 EVE 日志中，`service` 字段必须显示对应的服务名称（非 `"unknown"`）
@@ -533,7 +531,7 @@ echo "脚本已生成: /tmp/run_mms_tests.sh"
 
 ```
 === Summary ===
-PASSED: 42
+PASSED: 48
 FAILED: 0
 ALL TESTS PASSED
 ```
@@ -1167,13 +1165,15 @@ python3 learning/tests/extract_initiate_details.py /tmp/mms_deep_test/gnl/eve.js
 ```
 initiate_request ===
   local_detail: (absent)
-  max_serv_outstanding: (absent)
+  max_serv_outstanding_calling: (absent)
+  max_serv_outstanding_called: (absent)
   data_structure_nesting_level: (absent)
   version_number: (absent)
   supported_services: (absent)
 initiate_response ===
   local_detail: (absent)
-  max_serv_outstanding: (absent)
+  max_serv_outstanding_calling: (absent)
+  max_serv_outstanding_called: (absent)
   data_structure_nesting_level: (absent)
   version_number: (absent)
   supported_services: (absent)
@@ -1224,7 +1224,7 @@ test result: ok. 5 passed; 0 failed; 0 ignored
 ```
 
 单元测试覆盖：
-- `test_parse_initiate_detail_all_fields`：完整参数（local_detail=65000, max_serv_outstanding=10, nesting_level=4, version=1, supported_services 位图）
+- `test_parse_initiate_detail_all_fields`：完整参数（local_detail=65000, max_serv_outstanding_calling=5, max_serv_outstanding_called=5, nesting_level=10, version=1, supported_services 位图）
 - `test_parse_initiate_detail_partial`：仅部分参数存在
 - `test_parse_initiate_detail_empty`：空内容
 - `test_parse_initiate_request` / `test_parse_initiate_response`：完整 PDU 级别解析
@@ -1459,7 +1459,7 @@ ALL DEEP PARSING TESTS PASSED
 | GetVariableAccessAttributes Response | ❌ 最小化 PDU | ❌ 暂未实现 | - |
 | GetNameList Request | ✅ named_variable | ✅ domain/named_variable/named_variable_list 三种 | object_class, object_scope, domain, continue_after |
 | GetNameList Response | ❌ 最小化 PDU | ✅ 多标识符/空列表/64条截断 | identifiers[], more_follows |
-| Initiate-Request | ✅ PDU 类型识别 | ✅ 全字段/部分字段/空内容 | local_detail, max_serv_outstanding, nesting_level, version, supported_services |
+| Initiate-Request | ✅ PDU 类型识别 | ✅ 全字段/部分字段/空内容 | local_detail, max_serv_outstanding_calling, max_serv_outstanding_called, nesting_level, version, supported_services |
 | Initiate-Response | ✅ PDU 类型识别 | ✅ 同上 | 同上 |
 | GetNamedVarListAttr Request | ✅ domain_specific | ✅ domain/vmd 两种 | scope, domain, item |
 | GetNamedVarListAttr Response | ✅ 完整 20 变量 | ✅ mmsDeletable + 多变量列表 | mms_deletable, variable_count, variables[] |
