@@ -24,7 +24,6 @@
 use super::mms::{MmsTransaction, ALPROTO_IEC61850_MMS};
 use crate::core::{STREAM_TOCLIENT, STREAM_TOSERVER};
 use crate::detect::{helper_keyword_register_sticky_buffer, SigTableElmtStickyBuffer};
-use crate::direction::Direction;
 use std::os::raw::{c_int, c_void};
 use suricata_sys::sys::{
     DetectEngineCtx, SCDetectBufferSetActiveList, SCDetectHelperBufferMpmRegister,
@@ -53,15 +52,10 @@ unsafe extern "C" fn iec61850_mms_service_setup(
 /// 获取事务中的服务名称字符串，供检测引擎进行内容匹配。
 /// flags 的 Direction 位决定取请求侧还是响应侧的 PDU。
 unsafe extern "C" fn iec61850_mms_service_get(
-    tx: *const c_void, flags: u8, buf: *mut *const u8, len: *mut u32,
+    tx: *const c_void, _flags: u8, buf: *mut *const u8, len: *mut u32,
 ) -> bool {
     let tx = cast_pointer!(tx, MmsTransaction);
-    let pdu = if flags & Direction::ToClient as u8 != 0 {
-        tx.response.as_ref()
-    } else {
-        tx.request.as_ref()
-    };
-    if let Some(pdu) = pdu {
+    if let Some(ref pdu) = tx.pdu {
         if let Some(service) = pdu.service_str() {
             *len = service.len() as u32;
             *buf = service.as_ptr();
@@ -88,15 +82,10 @@ unsafe extern "C" fn iec61850_mms_pdu_type_setup(
 
 /// 获取事务中的 PDU 类型字符串，供检测引擎进行内容匹配
 unsafe extern "C" fn iec61850_mms_pdu_type_get(
-    tx: *const c_void, flags: u8, buf: *mut *const u8, len: *mut u32,
+    tx: *const c_void, _flags: u8, buf: *mut *const u8, len: *mut u32,
 ) -> bool {
     let tx = cast_pointer!(tx, MmsTransaction);
-    let pdu = if flags & Direction::ToClient as u8 != 0 {
-        tx.response.as_ref()
-    } else {
-        tx.request.as_ref()
-    };
-    if let Some(pdu) = pdu {
+    if let Some(ref pdu) = tx.pdu {
         let pdu_type = pdu.pdu_type_str();
         *len = pdu_type.len() as u32;
         *buf = pdu_type.as_ptr();

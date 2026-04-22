@@ -306,4 +306,157 @@ mod tests {
             panic!("Expected Incomplete error");
         }
     }
+
+    // ====== COTP 帧类型边界测试 ======
+
+    #[test]
+    fn test_parse_cotp_cc() {
+        // COTP CC: length=6, pdu_type=0xD0, 5 bytes of header params
+        let buf = [0x06, 0xD0, 0x00, 0x01, 0x00, 0x02, 0xC0, 0xBB];
+        let (rem, cotp) = parse_cotp_header(&buf).unwrap();
+        assert_eq!(cotp.pdu_type, CotpPduType::ConnectionConfirm);
+        assert_eq!(cotp.tpdu_nr, 0);
+        assert!(cotp.last_unit);
+        assert_eq!(rem, &[0xBB]); // 跳过 5 字节头部参数后剩余
+    }
+
+    #[test]
+    fn test_parse_cotp_dr() {
+        // COTP DR: length=6, pdu_type=0x80, 5 bytes header params
+        let buf = [0x06, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0xCC];
+        let (rem, cotp) = parse_cotp_header(&buf).unwrap();
+        assert_eq!(cotp.pdu_type, CotpPduType::DisconnectRequest);
+        assert_eq!(rem, &[0xCC]);
+    }
+
+    #[test]
+    fn test_parse_cotp_dt_eot0() {
+        // DT 帧 EOT=0（中间分片）
+        let buf = [0x02, 0xF0, 0x00, 0xAA]; // nr_and_eot=0x00 → EOT=0, tpdu_nr=0
+        let (rem, cotp) = parse_cotp_header(&buf).unwrap();
+        assert_eq!(cotp.pdu_type, CotpPduType::DataTransfer);
+        assert!(!cotp.last_unit);
+        assert_eq!(cotp.tpdu_nr, 0);
+        assert_eq!(rem, &[0xAA]);
+    }
+
+    #[test]
+    fn test_parse_cotp_dt_with_tpdu_nr() {
+        // DT 帧 tpdu_nr=5, EOT=1 → nr_and_eot = 0x80 | 0x05 = 0x85
+        let buf = [0x02, 0xF0, 0x85, 0xBB];
+        let (_, cotp) = parse_cotp_header(&buf).unwrap();
+        assert!(cotp.last_unit);
+        assert_eq!(cotp.tpdu_nr, 5);
+    }
+
+    #[test]
+    fn test_parse_cotp_dt_length_too_short() {
+        // DT 帧 length=1（< 2）→ 错误
+        let buf = [0x01, 0xF0, 0x80];
+        assert!(parse_cotp_header(&buf).is_err());
+    }
+
+    #[test]
+    fn test_parse_cotp_cr_length_zero() {
+        // CR 帧 length=0（< 1）→ 错误
+        let buf = [0x00, 0xE0];
+        assert!(parse_cotp_header(&buf).is_err());
+    }
+
+    #[test]
+    fn test_parse_cotp_dt_remaining_header() {
+        // DT 帧 length=4（比标准的2多出2字节额外头部），应跳过额外字节
+        // header: length(1=0x04) + type(1=0xF0) + nr_eot(1=0x80) + extra(2) = 5 consumed
+        let buf = [0x04, 0xF0, 0x80, 0x00, 0x00, 0xAA, 0xBB];
+        let (rem, cotp) = parse_cotp_header(&buf).unwrap();
+        assert_eq!(cotp.pdu_type, CotpPduType::DataTransfer);
+        assert!(cotp.last_unit);
+        assert_eq!(rem, &[0xAA, 0xBB]); // 跳过 2 字节额外头部后的载荷
+    }
+
+    // ====== TPKT + COTP 完整帧边界测试 ======
+
+    #[test]
+    fn test_tpkt_cotp_frame_wrong_version() {
+        // TPKT version=2（不是3）→ 错误
+        let buf = [0x02, 0x00, 0x00, 0x0B, 0x02, 0xF0, 0x80, 0x00, 0x00, 0x00, 0x00];
+        assert!(parse_tpkt_cotp_frame(&buf).is_err());
+    }
+
+    #[test]
+    fn test_tpkt_cotp_frame_length_too_small() {
+        // TPKT length=3（< TPKT_HEADER_LEN=4）→ 错误
+        let buf = [0x03, 0x00, 0x00, 0x03, 0x02, 0xF0, 0x80];
+        assert!(parse_tpkt_cotp_frame(&buf).is_err());
+    }
+
+    #[test]
+    fn test_tpkt_cotp_frame_incomplete_payload() {
+        // TPKT length=12，但只提供了 8 字节 → Incomplete
+        let buf = [0x03, 0x00, 0x00, 0x0C, 0x02, 0xF0, 0x80, 0xA8];
+        let result = parse_tpkt_cotp_frame(&buf);
+        assert!(matches!(result, Err(nom7::Err::Incomplete(_))));
+    }
+
+    #[test]
+    fn test_tpkt_cotp_frame_cr() {
+        // TPKT + COTP CR 完整帧，CR 无 MMS 载荷
+        let buf = [
+            0x03, 0x00, 0x00, 0x0B, // TPKT: length=11
+            0x06, 0xE0, 0x00, 0x00, 0x00, 0x01, 0xC0, // COTP CR: length=6
+        ];
+        let (rem, frame) = parse_tpkt_cotp_frame(&buf).unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(frame.cotp.pdu_type, CotpPduType::ConnectionRequest);
+        assert!(frame.payload.is_empty()); // CR 无载荷
+    }
+
+    #[test]
+    fn test_tpkt_cotp_frame_two_consecutive() {
+        // 两个 TPKT 帧背靠背，第一次解析应只消费第一帧
+        let buf = [
+            // 帧1: TPKT(7 bytes) + COTP DT(3 bytes) = no payload
+            0x03, 0x00, 0x00, 0x07,
+            0x02, 0xF0, 0x80,
+            // 帧2: TPKT(9 bytes)
+            0x03, 0x00, 0x00, 0x09,
+            0x02, 0xF0, 0x80,
+            0xAB, 0x00,
+        ];
+        let (rem, frame1) = parse_tpkt_cotp_frame(&buf).unwrap();
+        assert_eq!(frame1.tpkt.length, 7);
+        assert!(frame1.payload.is_empty());
+        // 剩余应是第二帧
+        assert_eq!(rem.len(), 9);
+        let (rem2, frame2) = parse_tpkt_cotp_frame(rem).unwrap();
+        assert!(rem2.is_empty());
+        assert_eq!(frame2.payload, &[0xAB, 0x00]);
+    }
+
+    // ====== probe_tpkt 边界测试 ======
+
+    #[test]
+    fn test_probe_tpkt_length_boundaries() {
+        // length=6 (< 7) → false
+        assert!(!probe_tpkt(&[0x03, 0x00, 0x00, 0x06]));
+        // length=7 → true (最小合法)
+        assert!(probe_tpkt(&[0x03, 0x00, 0x00, 0x07]));
+        // length=65529 → true (最大合法)
+        assert!(probe_tpkt(&[0x03, 0x00, 0xFF, 0xF9]));
+        // length=65530 → false
+        assert!(!probe_tpkt(&[0x03, 0x00, 0xFF, 0xFA]));
+    }
+
+    // ====== CotpPduType::from_byte 测试 ======
+
+    #[test]
+    fn test_cotp_pdu_type_from_byte() {
+        assert_eq!(CotpPduType::from_byte(0xE0), CotpPduType::ConnectionRequest);
+        assert_eq!(CotpPduType::from_byte(0xE1), CotpPduType::ConnectionRequest); // 低 4 位忽略
+        assert_eq!(CotpPduType::from_byte(0xD0), CotpPduType::ConnectionConfirm);
+        assert_eq!(CotpPduType::from_byte(0x80), CotpPduType::DisconnectRequest);
+        assert_eq!(CotpPduType::from_byte(0xF0), CotpPduType::DataTransfer);
+        assert_eq!(CotpPduType::from_byte(0x40), CotpPduType::Unknown(0x40));
+        assert_eq!(CotpPduType::from_byte(0x00), CotpPduType::Unknown(0x00));
+    }
 }

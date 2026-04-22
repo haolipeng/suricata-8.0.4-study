@@ -24,5 +24,6 @@ pub mod detect;
 pub mod logger;
 pub mod mms;
 mod mms_pdu;
+mod mms_types;
 mod parser;
 mod session;

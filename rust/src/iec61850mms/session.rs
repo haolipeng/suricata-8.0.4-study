@@ -26,8 +26,8 @@ use super::ber::{parse_ber_integer, parse_ber_tlv};
 pub(super) enum SessionExtractResult<'a> {
     /// 成功提取到 MMS PDU 载荷。
     Mms(&'a [u8]),
-    /// Session CONNECT/ACCEPT，属于初始化阶段。
-    Init,
+    /// Session CONNECT/ACCEPT，属于初始化阶段。携带可选的 MMS PDU 载荷。
+    Init(Option<&'a [u8]>),
     /// Session FINISH/DISCONNECT，属于会话收尾阶段。
     SessionClose,
 }
@@ -45,6 +45,27 @@ pub(super) fn is_direct_mms_pdu(payload: &[u8]) -> bool {
     (0xA0..=0xAD).contains(&b) || (0x80..=0x8D).contains(&b)
 }
 
+/// 解析 Session SPDU 的长度字段（ISO 8327-1 §8.2 Length Encoding）。
+/// - 0x00..=0xFE：单字节，直接表示长度值
+/// - 0xFF：后续 2 字节大端表示实际长度
+/// 返回 (长度值, 消耗的字节数)。
+fn parse_session_length(data: &[u8]) -> Result<(usize, usize), ()> {
+    if data.is_empty() {
+        return Err(());
+    }
+    if data[0] != 0xFF {
+        // 短格式：单字节直接表示长度 (0..=254)
+        Ok((data[0] as usize, 1))
+    } else {
+        // 长格式：0xFF + 2 字节大端
+        if data.len() < 3 {
+            return Err(());
+        }
+        let len = ((data[1] as usize) << 8) | (data[2] as usize);
+        Ok((len, 3))
+    }
+}
+
 /// 从 OSI Session/Presentation 层封装中提取 MMS PDU。
 /// 返回值：
 /// - `Ok(SessionExtractResult::Mms(mms_payload))`：成功剥离封装并提取到 MMS 载荷
@@ -60,7 +81,21 @@ pub(super) fn extract_mms_from_session(payload: &[u8]) -> Result<SessionExtractR
 
     match spdu_type {
         // Session CONNECT (0x0D) 或 ACCEPT (0x0E)：属于 MMS 初始化阶段
-        0x0D | 0x0E => Ok(SessionExtractResult::Init),
+        // 尝试跳过 Session 头部参数，进入 Presentation 层提取 MMS Initiate PDU
+        0x0D | 0x0E => {
+            let (session_len, len_size) = parse_session_length(&payload[1..])?;
+            let header_total = 1 + len_size + session_len;
+            if header_total < payload.len() {
+                // Session 头之后是 Presentation 层数据
+                let pres_data = &payload[header_total..];
+                match extract_mms_from_presentation(pres_data) {
+                    Ok(Some(mms_data)) => Ok(SessionExtractResult::Init(Some(mms_data))),
+                    _ => Ok(SessionExtractResult::Init(None)),
+                }
+            } else {
+                Ok(SessionExtractResult::Init(None))
+            }
+        }
 
         // Session FINISH (0x09) 或 DISCONNECT (0x0A)：属于会话收尾阶段
         0x09 | 0x0A => Ok(SessionExtractResult::SessionClose),
@@ -82,8 +117,7 @@ pub(super) fn extract_mms_from_session(payload: &[u8]) -> Result<SessionExtractR
             let pres_data = &payload[4..];
             extract_mms_from_presentation(pres_data).map(|opt| match opt {
                 Some(data) => SessionExtractResult::Mms(data),
-                // 仅为兼容返回类型；当前实现不会返回 Ok(None)
-                None => SessionExtractResult::Init,
+                None => SessionExtractResult::Init(None),
             })
         }
 
@@ -193,7 +227,7 @@ mod tests {
         // SPDU 0x0D → Init
         let payload = [0x0D, 0x00];
         match extract_mms_from_session(&payload).unwrap() {
-            SessionExtractResult::Init => {}
+            SessionExtractResult::Init(_) => {}
             _ => panic!("Expected Init for Session CONNECT"),
         }
     }
@@ -213,5 +247,218 @@ mod tests {
         // 不足 2 字节应返回 Err
         assert!(extract_mms_from_session(&[]).is_err());
         assert!(extract_mms_from_session(&[0x0D]).is_err());
+    }
+
+    // ====== parse_session_length 测试 ======
+
+    #[test]
+    fn test_parse_session_length_short() {
+        // 短格式：0x00..=0xFE 直接表示长度
+        assert_eq!(parse_session_length(&[0x00]).unwrap(), (0, 1));
+        assert_eq!(parse_session_length(&[0x05]).unwrap(), (5, 1));
+        assert_eq!(parse_session_length(&[0xFE]).unwrap(), (254, 1));
+    }
+
+    #[test]
+    fn test_parse_session_length_long() {
+        // 长格式：0xFF + 2字节大端
+        assert_eq!(parse_session_length(&[0xFF, 0x00, 0xFF]).unwrap(), (255, 3));
+        assert_eq!(parse_session_length(&[0xFF, 0x01, 0x00]).unwrap(), (256, 3));
+    }
+
+    #[test]
+    fn test_parse_session_length_long_truncated() {
+        // 长格式但数据不足 → Err
+        assert!(parse_session_length(&[0xFF]).is_err());
+        assert!(parse_session_length(&[0xFF, 0x01]).is_err());
+    }
+
+    #[test]
+    fn test_parse_session_length_empty() {
+        assert!(parse_session_length(&[]).is_err());
+    }
+
+    #[test]
+    fn test_extract_session_connect_long_length() {
+        // CONNECT SPDU 使用长格式长度：0xFF + 2字节 = 参数长度3
+        // 参数内容为 3 字节填充，之后无 Presentation 层数据
+        let payload = [0x0D, 0xFF, 0x00, 0x03, 0x00, 0x00, 0x00];
+        match extract_mms_from_session(&payload).unwrap() {
+            SessionExtractResult::Init(None) => {}
+            other => panic!("Expected Init(None), got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    // ====== Give Tokens + Data Transfer 边界测试 ======
+
+    #[test]
+    fn test_give_tokens_too_short() {
+        // Give Tokens 类型但不足 4 字节 → Err
+        assert!(extract_mms_from_session(&[0x01, 0x00, 0x01]).is_err());
+        assert!(extract_mms_from_session(&[0x01, 0x00]).is_err());
+    }
+
+    #[test]
+    fn test_give_tokens_bad_gt_length() {
+        // Give Tokens length != 0x00 → Err
+        let payload = [0x01, 0x01, 0x01, 0x00];
+        assert!(extract_mms_from_session(&payload).is_err());
+    }
+
+    #[test]
+    fn test_give_tokens_bad_dt_type() {
+        // Data Transfer type != 0x01 → Err
+        let payload = [0x01, 0x00, 0x02, 0x00];
+        assert!(extract_mms_from_session(&payload).is_err());
+    }
+
+    #[test]
+    fn test_give_tokens_bad_dt_length() {
+        // Data Transfer length != 0x00 → Err
+        let payload = [0x01, 0x00, 0x01, 0x01];
+        assert!(extract_mms_from_session(&payload).is_err());
+    }
+
+    #[test]
+    fn test_give_tokens_no_presentation_data() {
+        // Give Tokens + Data Transfer 正确，但无后续 Presentation 数据 → Err
+        // (extract_mms_from_presentation 对空输入返回 Err)
+        let payload = [0x01, 0x00, 0x01, 0x00];
+        assert!(extract_mms_from_session(&payload).is_err());
+    }
+
+    #[test]
+    fn test_session_disconnect() {
+        // DISCONNECT (0x0A) → SessionClose
+        let payload = [0x0A, 0x00];
+        match extract_mms_from_session(&payload).unwrap() {
+            SessionExtractResult::SessionClose => {}
+            _ => panic!("Expected SessionClose for Session DISCONNECT"),
+        }
+    }
+
+    #[test]
+    fn test_session_unknown_spdu_type() {
+        // 未知 SPDU 类型 → Err
+        assert!(extract_mms_from_session(&[0x55, 0x00]).is_err());
+        assert!(extract_mms_from_session(&[0x30, 0x00]).is_err());
+    }
+
+    // ====== Presentation 层测试 ======
+
+    #[test]
+    fn test_presentation_non_mms_context_skipped() {
+        // PDV-list 有一个条目 context-id=5（非 MMS），后跟一个 context-id=3（MMS）
+        // 应跳过 id=5，找到 id=3 并提取 MMS 数据
+        let payload = [
+            0x01, 0x00, 0x01, 0x00, // Give Tokens + Data Transfer
+            0x61, 0x16,             // fully-encoded-data [APPLICATION 1], length=22
+            // PDV-list entry 1: context-id=5 (非 MMS, 应跳过)
+            0x30, 0x08,             // SEQUENCE, length=8
+            0x02, 0x01, 0x05,       // INTEGER context-id=5
+            0xA0, 0x03,             // [0] single-ASN1-type wrapper, length=3
+            0x30, 0x01, 0x00,       // 某些其他数据
+            // PDV-list entry 2: context-id=3 (MMS)
+            0x30, 0x0A,             // SEQUENCE, length=10
+            0x02, 0x01, 0x03,       // INTEGER context-id=3
+            0xA0, 0x05,             // [0] single-ASN1-type wrapper, length=5
+            0xA8, 0x03, 0x80, 0x01, 0x01, // MMS Initiate-Request
+        ];
+        match extract_mms_from_session(&payload).unwrap() {
+            SessionExtractResult::Mms(data) => {
+                // 提取到的应是 MMS Initiate-Request
+                assert_eq!(data[0], 0xA8);
+            }
+            other => panic!("Expected Mms, got {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn test_presentation_context_id_1() {
+        // 某些实现使用 context-id=1 作为 MMS 上下文
+        let payload = [
+            0x01, 0x00, 0x01, 0x00, // Give Tokens + Data Transfer
+            0x61, 0x0C,             // fully-encoded-data
+            0x30, 0x0A,             // SEQUENCE
+            0x02, 0x01, 0x01,       // INTEGER context-id=1
+            0xA0, 0x05,             // [0] wrapper
+            0xAB, 0x03, 0x80, 0x01, 0x00, // MMS Conclude-Request (with content)
+        ];
+        match extract_mms_from_session(&payload).unwrap() {
+            SessionExtractResult::Mms(data) => {
+                assert_eq!(data[0], 0xAB); // Conclude-Request tag
+            }
+            _ => panic!("Expected Mms"),
+        }
+    }
+
+    #[test]
+    fn test_presentation_no_mms_context() {
+        // 所有 PDV-list 条目都不是 MMS context (id != 1 和 != 3) → Err
+        let payload = [
+            0x01, 0x00, 0x01, 0x00,
+            0x61, 0x08,
+            0x30, 0x06,
+            0x02, 0x01, 0x05,       // context-id=5
+            0xA0, 0x01, 0x00,
+        ];
+        assert!(extract_mms_from_session(&payload).is_err());
+    }
+
+    #[test]
+    fn test_presentation_bad_tag() {
+        // 顶层不是 [APPLICATION 1] (0x61) → Err
+        let payload = [
+            0x01, 0x00, 0x01, 0x00,
+            0x30, 0x06,             // SEQUENCE 而非 APPLICATION 1
+            0x30, 0x04,
+            0x02, 0x01, 0x03,
+            0x00,
+        ];
+        assert!(extract_mms_from_session(&payload).is_err());
+    }
+
+    #[test]
+    fn test_presentation_wrapper_not_a0() {
+        // context-id=3 匹配，但 wrapper tag 不是 0xA0 → 跳过该条目 → Err
+        let payload = [
+            0x01, 0x00, 0x01, 0x00,
+            0x61, 0x08,
+            0x30, 0x06,
+            0x02, 0x01, 0x03,       // context-id=3
+            0xA1, 0x01, 0x00,       // wrapper tag=0xA1 (不是 0xA0)
+        ];
+        assert!(extract_mms_from_session(&payload).is_err());
+    }
+
+    #[test]
+    fn test_session_accept() {
+        // ACCEPT (0x0E) 与 CONNECT 走相同逻辑，验证 Init 路径
+        let payload = [0x0E, 0x00];
+        match extract_mms_from_session(&payload).unwrap() {
+            SessionExtractResult::Init(_) => {}
+            _ => panic!("Expected Init for Session ACCEPT"),
+        }
+    }
+
+    #[test]
+    fn test_session_connect_with_presentation() {
+        // CONNECT SPDU 带 4 字节参数，之后跟 Presentation 层包含 MMS Init
+        let payload = [
+            0x0D, 0x04,             // CONNECT, length=4
+            0x00, 0x00, 0x00, 0x00, // 4 字节参数（填充）
+            // Presentation 层
+            0x61, 0x0C,
+            0x30, 0x0A,
+            0x02, 0x01, 0x03,       // context-id=3
+            0xA0, 0x05,
+            0xA8, 0x03, 0x80, 0x01, 0x01, // MMS Initiate-Request
+        ];
+        match extract_mms_from_session(&payload).unwrap() {
+            SessionExtractResult::Init(Some(data)) => {
+                assert_eq!(data[0], 0xA8);
+            }
+            other => panic!("Expected Init(Some), got {:?}", std::mem::discriminant(&other)),
+        }
     }
 }

@@ -20,6 +20,9 @@
 //! 提供 ASN.1 BER TLV 解析、长度编码、整数解析、字符串解析等通用功能，
 //! 供 MMS PDU 解析和 Session/Presentation 层解包复用。
 
+/// BER 递归解析最大深度，防止恶意嵌套数据导致栈溢出。
+pub(super) const MAX_BER_DEPTH: usize = 16;
+
 /// Parse a BER TLV (Tag-Length-Value) header.
 /// Returns (tag_byte, is_constructed, tag_number, content, remaining).
 /// tag_number is u32 to support multi-byte tags (tag >= 31).
@@ -96,7 +99,8 @@ pub(super) fn parse_ber_length(input: &[u8]) -> Result<(usize, usize), ()> {
     }
 }
 
-/// Parse a BER INTEGER value.
+/// Parse a BER INTEGER value (unsigned).
+/// 用于 invokeId、objectClass 等协议定义为非负的字段。
 pub(super) fn parse_ber_integer(content: &[u8]) -> Result<u32, ()> {
     if content.is_empty() || content.len() > 4 {
         return Err(());
@@ -104,6 +108,21 @@ pub(super) fn parse_ber_integer(content: &[u8]) -> Result<u32, ()> {
     let mut val: u32 = 0;
     for &b in content {
         val = (val << 8) | (b as u32);
+    }
+    Ok(val)
+}
+
+/// Parse a BER INTEGER value (signed).
+/// 用于 MMS Data [5] integer 等 ASN.1 有符号整数字段。
+/// 参照 libiec61850 BerDecoder_decodeInt32 的符号扩展逻辑。
+pub(super) fn parse_ber_signed_integer(content: &[u8]) -> Result<i64, ()> {
+    if content.is_empty() || content.len() > 8 {
+        return Err(());
+    }
+    // 最高位为 1 时初始化为 -1（全 F），实现符号扩展
+    let mut val: i64 = if (content[0] & 0x80) != 0 { -1 } else { 0 };
+    for &b in content {
+        val = (val << 8) | (b as i64);
     }
     Ok(val)
 }
@@ -162,6 +181,48 @@ mod tests {
     fn test_parse_ber_integer_overflow() {
         // 超过 4 字节应返回 Err
         assert!(parse_ber_integer(&[0x01, 0x02, 0x03, 0x04, 0x05]).is_err());
+    }
+
+    // ====== parse_ber_signed_integer 测试 ======
+
+    #[test]
+    fn test_parse_ber_signed_integer_positive() {
+        assert_eq!(parse_ber_signed_integer(&[0x01]).unwrap(), 1);
+        assert_eq!(parse_ber_signed_integer(&[0x7F]).unwrap(), 127);
+        assert_eq!(parse_ber_signed_integer(&[0x00, 0xFF]).unwrap(), 255);
+        assert_eq!(parse_ber_signed_integer(&[0x01, 0x00]).unwrap(), 256);
+    }
+
+    #[test]
+    fn test_parse_ber_signed_integer_negative() {
+        // -1: 单字节 0xFF
+        assert_eq!(parse_ber_signed_integer(&[0xFF]).unwrap(), -1);
+        // -1: 双字节 0xFF 0xFF
+        assert_eq!(parse_ber_signed_integer(&[0xFF, 0xFF]).unwrap(), -1);
+        // -128: 0x80
+        assert_eq!(parse_ber_signed_integer(&[0x80]).unwrap(), -128);
+        // -256: 0xFF 0x00
+        assert_eq!(parse_ber_signed_integer(&[0xFF, 0x00]).unwrap(), -256);
+        // -32768: 0x80 0x00
+        assert_eq!(parse_ber_signed_integer(&[0x80, 0x00]).unwrap(), -32768);
+    }
+
+    #[test]
+    fn test_parse_ber_signed_integer_zero() {
+        assert_eq!(parse_ber_signed_integer(&[0x00]).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_parse_ber_signed_integer_empty() {
+        assert!(parse_ber_signed_integer(&[]).is_err());
+    }
+
+    #[test]
+    fn test_parse_ber_signed_integer_max_8_bytes() {
+        // 8 字节正数
+        assert!(parse_ber_signed_integer(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_ok());
+        // 超过 8 字节应返回 Err
+        assert!(parse_ber_signed_integer(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]).is_err());
     }
 
     #[test]
