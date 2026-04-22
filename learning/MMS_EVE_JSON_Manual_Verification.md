@@ -171,11 +171,11 @@ cat "$OUT/s6/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_m
 #### 预期输出（共 2 条，该 pcap 仅含客户端请求帧）
 
 ```json
-{ "direction": "request", "pdu_type": "initiate_request", "local_detail": 31, "max_serv_outstanding": 3, "data_structure_nesting_level": 3 }
+{ "direction": "request", "pdu_type": "initiate_request", "local_detail": 31, "max_serv_outstanding_calling": 3, "max_serv_outstanding_called": 3, "data_structure_nesting_level": 2056, "version_number": 1, "supported_services": "03ffffffffffffffffffffff" }
 { "direction": "request", "pdu_type": "confirmed_request", "invoke_id": 1, "service": "read", "variables": [{ "scope": "vmd_specific", "item": "$MSG$1$$" }] }
 ```
 
-- Initiate 协商参数（`local_detail` 等）被深度解析
+- Initiate 协商参数（`local_detail`、`max_serv_outstanding_calling/called`、`version_number`、`supported_services` 等）被深度解析
 - 无 COTP CR/CC 空事务
 
 ---
@@ -196,7 +196,7 @@ cat "$OUT/s7/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_m
 { "direction": "response", "pdu_type": "unconfirmed", "service": "information_report" }
 ```
 
-共 5 条（含 Initiate 2 条 + Conclude 2 条）。`pdu_type = "unconfirmed"` 正确识别非确认 PDU，`service = "information_report"` 正确识别服务类型。
+共 5 条（含 Initiate 2 条 + Conclude 2 条）。`pdu_type = "unconfirmed"` 正确识别非确认 PDU，`service = "information_report"` 正确识别服务类型。Initiate 事务含 `local_detail`、`max_serv_outstanding_calling`/`called`、`data_structure_nesting_level` 等协商参数。
 
 ---
 
@@ -213,7 +213,7 @@ cat "$OUT/s8/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_m
 #### 预期输出（共 2 条）
 
 ```json
-{ "direction": "request",  "pdu_type": "initiate_request", "local_detail": 1024, "max_serv_outstanding": 5, "data_structure_nesting_level": 5 }
+{ "direction": "request",  "pdu_type": "initiate_request", "local_detail": 1024, "max_serv_outstanding_calling": 5, "max_serv_outstanding_called": 5, "data_structure_nesting_level": 4 }
 { "direction": "response", "pdu_type": "initiate_error" }
 ```
 
@@ -287,15 +287,16 @@ cat "$OUT/s11/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_
 响应：
 ```json
 { "direction": "response", "pdu_type": "confirmed_response", "invoke_id": 1, "service": "read", "result_count": 2, "results": [
-  { "success": true, "data_type": "floating-point", "value": "1234.5" },
-  { "success": true, "data_type": "floating-point", "value": "-567.89" }
+  { "success": true, "data_type": "integer", "value": "35510702080" },
+  { "success": true, "data_type": "integer", "value": "37648988406" }
 ] }
 ```
 
 共 6 条（含 Initiate 2 条 + Conclude 2 条）。
 
 - `variables` 含 2 个 domain_specific 变量，深度解析正确
-- `result_count = 2`，每条含 `data_type = "floating-point"` 和具体数值
+- `result_count = 2`，每条含 `data_type` 和具体数值
+- 注意：该 pcap 由 `tools/generate_test_pcaps.py` 构造，使用的 tag byte `0x85` 在标签修正后对应 MMS Data `[5] integer`（非 floating-point）。如需测试 floating-point，应使用 tag byte `0x87`（[7]）重新生成 pcap
 - 对比场景 1 的空结果集，验证了非空 Read 响应的深度解析能力
 
 ---
@@ -370,4 +371,4 @@ cat "$OUT/s12/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_
 | GetVariableAccessAttributes | response | `mms_deletable`、`type_description` |
 | GetNamedVariableListAttributes | request | `object_name` — 含 `scope`、`domain`（可选）、`item` |
 | GetNamedVariableListAttributes | response | `mms_deletable`、`variable_count`、`variables[]` |
-| Initiate | request/response | `local_detail`、`max_serv_outstanding`、`data_structure_nesting_level`、`version_number`、`supported_services`（hex） |
+| Initiate | request/response | `local_detail`、`max_serv_outstanding_calling`、`max_serv_outstanding_called`、`data_structure_nesting_level`、`version_number`、`supported_services`（hex） |
