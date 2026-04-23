@@ -253,7 +253,10 @@ fn parse_initiate_detail(content: &[u8], depth: usize) -> MmsInitDetail {
                                 }
                                 0x81 => {} // [1] parameterCBB — 暂不解析
                                 0x82 => { // [2] servicesSupportedCalling/Called — 服务支持位图
-                                    detail.supported_services = Some(dinner.to_vec());
+                                    // BIT STRING 内容：第 1 字节为 unused bits 数，跳过
+                                    if dinner.len() > 1 {
+                                        detail.supported_services = Some(dinner[1..].to_vec());
+                                    }
                                 }
                                 _ => {}
                             }
@@ -1250,17 +1253,17 @@ mod tests {
         //   [4] 0xA4 initRequestDetail SEQUENCE {
         //     [0] versionNumber = 1
         //     [1] parameterCBB = (bit string, 跳过)
-        //     [2] servicesSupportedCalling = 0xEE 0x1C
+        //     [2] servicesSupportedCalling = BIT STRING: 0x00(unused bits) + 0xEE 0x1C
         //   }
         let content: &[u8] = &[
             0x80, 0x03, 0x00, 0xFD, 0xE8, // [0] localDetail = 65000
             0x81, 0x01, 0x05,             // [1] maxServOutstandingCalling = 5
             0x82, 0x01, 0x05,             // [2] maxServOutstandingCalled = 5
             0x83, 0x01, 0x0A,             // [3] nestingLevel = 10
-            0xA4, 0x0C,                   // [4] initRequestDetail
+            0xA4, 0x0D,                   // [4] initRequestDetail
                 0x80, 0x01, 0x01,         //   [0] versionNumber = 1
                 0x81, 0x03, 0x00, 0xFB, 0x00, //   [1] parameterCBB (ignored)
-                0x82, 0x02, 0xEE, 0x1C,   //   [2] servicesSupportedCalling
+                0x82, 0x03, 0x00, 0xEE, 0x1C, //   [2] servicesSupportedCalling (BIT STRING: 0 unused + EE 1C)
         ];
         let detail = parse_initiate_detail(content, 0);
         assert_eq!(detail.local_detail, Some(65000));
@@ -1296,14 +1299,14 @@ mod tests {
     fn test_parse_mms_pdu_initiate_request_full() {
         // 完整 Initiate-Request PDU，参照 libiec61850 编码顺序
         let data: &[u8] = &[
-            0xA8, 0x15, // [8] Initiate-Request, length=21
+            0xA8, 0x16, // [8] Initiate-Request, length=22
             0x80, 0x02, 0x04, 0x00, // [0] localDetail = 1024
             0x81, 0x01, 0x05,       // [1] maxServOutstandingCalling = 5
             0x82, 0x01, 0x05,       // [2] maxServOutstandingCalled = 5
             0x83, 0x01, 0x04,       // [3] nestingLevel = 4
-            0xA4, 0x06,             // [4] initRequestDetail
+            0xA4, 0x07,             // [4] initRequestDetail
                 0x80, 0x01, 0x01,   //   [0] versionNumber = 1
-                0x82, 0x01, 0xFF,   //   [2] servicesSupportedCalling
+                0x82, 0x02, 0x00, 0xFF, //   [2] servicesSupportedCalling (BIT STRING: 0 unused bits + 0xFF)
         ];
         let result = parse_mms_pdu(data).unwrap();
         match result {
