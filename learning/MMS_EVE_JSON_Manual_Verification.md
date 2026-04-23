@@ -72,14 +72,18 @@ suricata -r "$PCAP_DIR/iec61850_write.pcap" -S /dev/null -c "$SURICATA_YAML" -l 
 cat "$OUT/s2/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_mms'
 ```
 
-#### 预期核心事务
+#### 预期输出（共 6 条）
 
 ```json
+{ "direction": "request",  "pdu_type": "initiate_request",  "local_detail": 30000, "max_serv_outstanding_calling": 1000, "max_serv_outstanding_called": 1000, "data_structure_nesting_level": 5, "version_number": 1, "supported_services": "ffffffffffffffffffffff00" }
+{ "direction": "response", "pdu_type": "initiate_response" }
 { "direction": "request",  "pdu_type": "confirmed_request",  "invoke_id": 0, "service": "write" }
+{ "direction": "response", "pdu_type": "confirmed_response", "invoke_id": 0, "service": "unknown" }
+{ "direction": "request",  "pdu_type": "conclude_request" }
 { "direction": "response", "pdu_type": "confirmed_response", "invoke_id": 0, "service": "unknown" }
 ```
 
-共 6 条（含 Initiate 2 条 + Conclude 2 条）。该 pcap 的 Write 请求不含可解析的变量规范，故无 `variables` 字段。响应为最小化 PDU，service 为 `unknown`。
+该 pcap 的 Write 请求不含可解析的变量规范，故无 `variables` 字段。Initiate 响应为最小化 PDU，无协商参数。最后一条为 `confirmed_response`（pcap 原始数据如此，非标准 Conclude 响应）。
 
 ---
 
@@ -91,18 +95,23 @@ suricata -r "$PCAP_DIR/iec61850_get_name_list.pcap" -S /dev/null -c "$SURICATA_Y
 cat "$OUT/s3/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_mms'
 ```
 
-#### 预期核心事务
+#### 预期输出（共 6 条）
 
 ```json
+{ "direction": "request",  "pdu_type": "initiate_request",  "local_detail": 30000, "max_serv_outstanding_calling": 1000, "max_serv_outstanding_called": 1000, "data_structure_nesting_level": 5, "version_number": 1, "supported_services": "ffffffffffffffffffffff00" }
+{ "direction": "response", "pdu_type": "initiate_response" }
 { "direction": "request",  "pdu_type": "confirmed_request",  "invoke_id": 0, "service": "get_name_list", "object_class": "named_variable", "object_scope": "vmd_specific" }
+{ "direction": "response", "pdu_type": "confirmed_response", "invoke_id": 0, "service": "unknown" }
+{ "direction": "request",  "pdu_type": "conclude_request" }
 { "direction": "response", "pdu_type": "confirmed_response", "invoke_id": 0, "service": "unknown" }
 ```
 
-共 6 条（含 Initiate 2 条 + Conclude 2 条）。
+共 6 条。
 
 - `object_class = "named_variable"` — 查询类型：列出变量
 - `object_scope = "vmd_specific"` — VMD 级别，无 domain
 - 本 pcap 仅覆盖 `named_variable`，`domain` 和 `named_variable_list` 两种类型通过 Rust 单元测试覆盖
+- 最后一条为 `confirmed_response`（同场景 2）
 
 ---
 
@@ -114,14 +123,18 @@ suricata -r "$PCAP_DIR/iec61850_get_variable_access_attributes.pcap" -S /dev/nul
 cat "$OUT/s4/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_mms'
 ```
 
-#### 预期核心事务
+#### 预期输出（共 6 条）
 
 ```json
+{ "direction": "request",  "pdu_type": "initiate_request",  "local_detail": 30000, "max_serv_outstanding_calling": 1000, "max_serv_outstanding_called": 1000, "data_structure_nesting_level": 5, "version_number": 1, "supported_services": "ffffffffffffffffffffff00" }
+{ "direction": "response", "pdu_type": "initiate_response" }
 { "direction": "request",  "pdu_type": "confirmed_request",  "invoke_id": 0, "service": "get_variable_access_attributes", "variable": { "scope": "vmd_specific", "item": "mu" } }
+{ "direction": "response", "pdu_type": "confirmed_response", "invoke_id": 0, "service": "unknown" }
+{ "direction": "request",  "pdu_type": "conclude_request" }
 { "direction": "response", "pdu_type": "confirmed_response", "invoke_id": 0, "service": "unknown" }
 ```
 
-共 6 条（含 Initiate 2 条 + Conclude 2 条）。`variable.scope = "vmd_specific"` 故无 domain 字段。
+共 6 条。`variable.scope = "vmd_specific"` 故无 domain 字段。最后一条为 `confirmed_response`（同场景 2）。
 
 ---
 
@@ -173,11 +186,12 @@ cat "$OUT/s6/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_m
 #### 预期输出（共 2 条，该 pcap 仅含客户端请求帧）
 
 ```json
-{ "direction": "request", "pdu_type": "initiate_request", "local_detail": 31, "max_serv_outstanding_calling": 3, "max_serv_outstanding_called": 3, "data_structure_nesting_level": 2056, "version_number": 1, "supported_services": "03ffffffffffffffffffffff" }
+{ "direction": "request", "pdu_type": "initiate_request", "local_detail": 31, "max_serv_outstanding_calling": 3, "max_serv_outstanding_called": 3, "data_structure_nesting_level": 2056, "version_number": 1, "supported_services": "ffffffffffffffffffffff" }
 { "direction": "request", "pdu_type": "confirmed_request", "invoke_id": 1, "service": "read", "variables": [{ "scope": "vmd_specific", "item": "$MSG$1$$" }] }
 ```
 
 - Initiate 协商参数（`local_detail`、`max_serv_outstanding_calling/called`、`version_number`、`supported_services` 等）被深度解析
+- `supported_services` 为纯位图 hex，不含 BIT STRING unused bits 前缀字节
 - 无 COTP CR/CC 空事务
 
 ---
@@ -192,13 +206,17 @@ suricata -r "$PCAP_DIR/unconfirmed_information_report.pcap" -S /dev/null -c "$SU
 cat "$OUT/s7/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_mms'
 ```
 
-#### 预期核心事务
+#### 预期输出（共 5 条）
 
 ```json
+{ "direction": "request",  "pdu_type": "initiate_request",  "local_detail": 1024, "max_serv_outstanding_calling": 5, "max_serv_outstanding_called": 5, "data_structure_nesting_level": 4 }
+{ "direction": "response", "pdu_type": "initiate_response", "local_detail": 1024, "max_serv_outstanding_calling": 5, "max_serv_outstanding_called": 5, "data_structure_nesting_level": 4 }
 { "direction": "response", "pdu_type": "unconfirmed", "service": "information_report" }
+{ "direction": "request",  "pdu_type": "conclude_request" }
+{ "direction": "response", "pdu_type": "conclude_response" }
 ```
 
-共 5 条（含 Initiate 2 条 + Conclude 2 条）。`pdu_type = "unconfirmed"` 正确识别非确认 PDU，`service = "information_report"` 正确识别服务类型。Initiate 事务含 `local_detail`、`max_serv_outstanding_calling`/`called`、`data_structure_nesting_level` 等协商参数。
+`pdu_type = "unconfirmed"` 正确识别非确认 PDU，`service = "information_report"` 正确识别服务类型。
 
 ---
 
@@ -219,7 +237,7 @@ cat "$OUT/s8/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_m
 { "direction": "response", "pdu_type": "initiate_error" }
 ```
 
-- 客户端发起 Initiate，服务端返回 `initiate_error` 拒绝
+- 客户端发起 Initiate（含协商参数），服务端返回 `initiate_error` 拒绝
 - 无后续 MMS 数据交换（关联未建立）
 
 ---
@@ -234,14 +252,16 @@ suricata -r "$PCAP_DIR/conclude_error.pcap" -S /dev/null -c "$SURICATA_YAML" -l 
 cat "$OUT/s9/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_mms'
 ```
 
-#### 预期核心事务
+#### 预期输出（共 4 条）
 
 ```json
+{ "direction": "request",  "pdu_type": "initiate_request",  "local_detail": 1024, "max_serv_outstanding_calling": 5, "max_serv_outstanding_called": 5, "data_structure_nesting_level": 4 }
+{ "direction": "response", "pdu_type": "initiate_response", "local_detail": 1024, "max_serv_outstanding_calling": 5, "max_serv_outstanding_called": 5, "data_structure_nesting_level": 4 }
 { "direction": "request",  "pdu_type": "conclude_request" }
 { "direction": "response", "pdu_type": "conclude_error" }
 ```
 
-共 4 条（含 Initiate 2 条）。`conclude_error` 表示服务端拒绝了客户端的关闭请求。
+`conclude_error` 表示服务端拒绝了客户端的关闭请求。
 
 ---
 
@@ -255,14 +275,18 @@ suricata -r "$PCAP_DIR/cancel_response.pcap" -S /dev/null -c "$SURICATA_YAML" -l
 cat "$OUT/s10/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_mms'
 ```
 
-#### 预期核心事务
+#### 预期输出（共 6 条）
 
 ```json
+{ "direction": "request",  "pdu_type": "initiate_request",  "local_detail": 1024, "max_serv_outstanding_calling": 5, "max_serv_outstanding_called": 5, "data_structure_nesting_level": 4 }
+{ "direction": "response", "pdu_type": "initiate_response", "local_detail": 1024, "max_serv_outstanding_calling": 5, "max_serv_outstanding_called": 5, "data_structure_nesting_level": 4 }
 { "direction": "request",  "pdu_type": "cancel_request",  "invoke_id": 42 }
 { "direction": "response", "pdu_type": "cancel_response", "invoke_id": 42 }
+{ "direction": "request",  "pdu_type": "conclude_request" }
+{ "direction": "response", "pdu_type": "conclude_response" }
 ```
 
-共 6 条（含 Initiate 2 条 + Conclude 2 条）。`invoke_id = 42` 双向一致。
+`invoke_id = 42` 双向一致。
 
 ---
 
@@ -276,10 +300,12 @@ suricata -r "$PCAP_DIR/read_response_with_data.pcap" -S /dev/null -c "$SURICATA_
 cat "$OUT/s11/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_mms'
 ```
 
-#### 预期核心事务
+#### 预期输出（共 6 条）
 
 请求：
 ```json
+{ "direction": "request",  "pdu_type": "initiate_request",  "local_detail": 1024, "max_serv_outstanding_calling": 5, "max_serv_outstanding_called": 5, "data_structure_nesting_level": 4 }
+{ "direction": "response", "pdu_type": "initiate_response", "local_detail": 1024, "max_serv_outstanding_calling": 5, "max_serv_outstanding_called": 5, "data_structure_nesting_level": 4 }
 { "direction": "request", "pdu_type": "confirmed_request", "invoke_id": 1, "service": "read", "variables": [
   { "scope": "domain_specific", "domain": "TestDomain", "item": "MMXU1$MX$TotW$mag$f" },
   { "scope": "domain_specific", "domain": "TestDomain", "item": "MMXU1$MX$TotVAr$mag$f" }
@@ -292,9 +318,11 @@ cat "$OUT/s11/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_
   { "success": true, "data_type": "integer", "value": "35510702080" },
   { "success": true, "data_type": "integer", "value": "37648988406" }
 ] }
+{ "direction": "request",  "pdu_type": "conclude_request" }
+{ "direction": "response", "pdu_type": "conclude_response" }
 ```
 
-共 6 条（含 Initiate 2 条 + Conclude 2 条）。
+共 6 条。
 
 - `variables` 含 2 个 domain_specific 变量，深度解析正确
 - `result_count = 2`，每条含 `data_type` 和具体数值
@@ -313,19 +341,23 @@ suricata -r "$PCAP_DIR/get_name_list_full_response.pcap" -S /dev/null -c "$SURIC
 cat "$OUT/s12/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_mms'
 ```
 
-#### 预期核心事务
+#### 预期输出（共 6 条）
 
 请求：
 ```json
+{ "direction": "request",  "pdu_type": "initiate_request",  "local_detail": 1024, "max_serv_outstanding_calling": 5, "max_serv_outstanding_called": 5, "data_structure_nesting_level": 4 }
+{ "direction": "response", "pdu_type": "initiate_response", "local_detail": 1024, "max_serv_outstanding_calling": 5, "max_serv_outstanding_called": 5, "data_structure_nesting_level": 4 }
 { "direction": "request", "pdu_type": "confirmed_request", "invoke_id": 10, "service": "get_name_list", "object_class": "named_variable", "object_scope": "domain_specific", "domain": "TestDomain" }
 ```
 
 响应：
 ```json
 { "direction": "response", "pdu_type": "confirmed_response", "invoke_id": 10, "service": "get_name_list", "identifiers": ["MMXU1$MX$TotW", "MMXU1$MX$TotVAr", "MMXU1$MX$Hz"], "more_follows": true }
+{ "direction": "request",  "pdu_type": "conclude_request" }
+{ "direction": "response", "pdu_type": "conclude_response" }
 ```
 
-共 6 条（含 Initiate 2 条 + Conclude 2 条）。
+共 6 条。
 
 - 对比场景 3 的 vmd_specific，本场景验证了 `object_scope = "domain_specific"` + `domain` 字段
 - 响应含 `identifiers` 列表和 `more_follows = true`（分页标记），对比场景 3 的 `service: "unknown"` 空响应
@@ -359,6 +391,13 @@ cat "$OUT/s12/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_
 | `pdu_type` | string | `confirmed_request`、`confirmed_response`、`confirmed_error`、`initiate_request`、`initiate_response`、`initiate_error`、`conclude_request`、`conclude_response`、`conclude_error`、`cancel_request`、`cancel_response`、`cancel_error`、`reject`、`unconfirmed` |
 | `invoke_id` | uint | Confirmed 类 PDU 的事务 ID（Initiate/Conclude 无此字段） |
 | `service` | string | `read`、`write`、`get_name_list`、`get_variable_access_attributes`、`get_named_variable_list_attributes`、`unknown` 等 |
+
+### ConfirmedError 专有字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `error_class` | string | 错误类别：`vmd-state`、`application-reference`、`definition`、`resource`、`service`、`service-preempt`、`time-resolution`、`access`、`initiate`、`conclude`、`cancel`、`file`、`others` |
+| `error_code` | string | 错误码名称（如 `object-non-existent`），未知码回退为数字字符串 |
 
 ### 各服务专有字段
 
