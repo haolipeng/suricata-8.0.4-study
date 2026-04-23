@@ -84,11 +84,16 @@ pub(super) fn extract_mms_from_session(payload: &[u8]) -> Result<SessionExtractR
         // 尝试跳过 Session 头部参数，进入 Presentation 层提取 MMS Initiate PDU
         0x0D | 0x0E => {
             let (session_len, len_size) = parse_session_length(&payload[1..])?;
-            let header_total = 1 + len_size + session_len;
-            if header_total < payload.len() {
-                // Session 头之后是 Presentation 层数据
-                let pres_data = &payload[header_total..];
-                match extract_mms_from_presentation(pres_data) {
+            let params_start = 1 + len_size;
+            let params_end = params_start + session_len;
+            if params_end > payload.len() {
+                return Ok(SessionExtractResult::Init(None));
+            }
+            // 遍历 Session 参数列表，查找 Session User Data (0xC1) 参数
+            // Presentation 层数据嵌套在该参数内部，而非 Session 头部之后
+            let pres_data = find_session_user_data(&payload[params_start..params_end]);
+            if let Some(data) = pres_data {
+                match extract_mms_from_presentation_init(data) {
                     Ok(Some(mms_data)) => Ok(SessionExtractResult::Init(Some(mms_data))),
                     _ => Ok(SessionExtractResult::Init(None)),
                 }
@@ -123,6 +128,165 @@ pub(super) fn extract_mms_from_session(payload: &[u8]) -> Result<SessionExtractR
 
         _ => Err(()),
     }
+}
+
+/// 遍历 Session 参数列表（TLV 序列），查找 Session User Data (type=0xC1)。
+/// 返回该参数的值部分（即 Presentation 层数据）。
+fn find_session_user_data<'a>(params: &'a [u8]) -> Option<&'a [u8]> {
+    let mut pos = params;
+    while pos.len() >= 2 {
+        let param_type = pos[0];
+        let (param_len, len_consumed) = match parse_session_length(&pos[1..]) {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
+        let value_start = 1 + len_consumed;
+        if value_start + param_len > pos.len() {
+            return None;
+        }
+        if param_type == 0xC1 {
+            return Some(&pos[value_start..value_start + param_len]);
+        }
+        pos = &pos[value_start + param_len..];
+    }
+    None
+}
+
+/// 从 Presentation 层 CP-type / CPA-type 中提取 MMS Initiate PDU。
+/// CONNECT/ACCEPT 阶段的 Presentation 结构：
+///   CP-type/CPA-type (SEQUENCE) → normal-mode-parameters → user-data →
+///   fully-encoded-data → PDV-list → context-id=1 → ACSE AARQ/AARE →
+///   user-information → EXTERNAL → single-ASN1-type → MMS Initiate PDU
+fn extract_mms_from_presentation_init(data: &[u8]) -> Result<Option<&[u8]>, ()> {
+    if data.is_empty() {
+        return Err(());
+    }
+
+    // CP-type 是 [APPLICATION 0] SET = 0x31，CPA-type 也是 0x31
+    let (tag_byte, _, _, cp_content, _) = parse_ber_tlv(data)?;
+    if tag_byte != 0x31 {
+        return Err(());
+    }
+
+    // 在 CP-type 中查找 normal-mode-parameters [2] = 0xA2
+    let mut pos = cp_content;
+    let mut normal_mode = None;
+    while !pos.is_empty() {
+        let (tag, _, _, inner, rem) = parse_ber_tlv(pos)?;
+        if tag == 0xA2 {
+            normal_mode = Some(inner);
+            break;
+        }
+        pos = rem;
+    }
+    let normal_mode = match normal_mode {
+        Some(d) => d,
+        None => return Err(()),
+    };
+
+    // 在 normal-mode-parameters 中查找 user-data [APPLICATION 0] = 0x61
+    // (user-data 是 fully-encoded-data)
+    pos = normal_mode;
+    let mut user_data = None;
+    while !pos.is_empty() {
+        let (tag, _, _, inner, rem) = parse_ber_tlv(pos)?;
+        if tag == 0x61 {
+            user_data = Some(inner);
+            break;
+        }
+        pos = rem;
+    }
+    let user_data = match user_data {
+        Some(d) => d,
+        None => return Err(()),
+    };
+
+    // 遍历 PDV-list 条目，查找 ACSE 上下文 (context-id=1)
+    pos = user_data;
+    while !pos.is_empty() {
+        let (entry_tag, _, _, entry_content, rem) = parse_ber_tlv(pos)?;
+        if entry_tag != 0x30 {
+            pos = rem;
+            continue;
+        }
+        if let Ok((id_tag, _, _, id_content, entry_rem)) = parse_ber_tlv(entry_content) {
+            if id_tag == 0x02 {
+                let ctx_id = parse_ber_integer(id_content).unwrap_or(0);
+                if ctx_id == 1 {
+                    // context-id=1 → ACSE，从 single-ASN1-type [0] 中提取 AARQ/AARE
+                    if let Ok((wrapper_tag, _, _, acse_data, _)) = parse_ber_tlv(entry_rem) {
+                        if wrapper_tag == 0xA0 {
+                            return extract_mms_from_acse(acse_data);
+                        }
+                    }
+                } else if ctx_id == 3 {
+                    // context-id=3 → 直接是 MMS（某些实现可能直接放这里）
+                    if let Ok((wrapper_tag, _, _, mms_data, _)) = parse_ber_tlv(entry_rem) {
+                        if wrapper_tag == 0xA0 {
+                            return Ok(Some(mms_data));
+                        }
+                    }
+                }
+            }
+        }
+        pos = rem;
+    }
+
+    Err(())
+}
+
+/// 从 ACSE AARQ/AARE PDU 中提取 MMS Initiate PDU。
+/// AARQ [APPLICATION 0] = 0x60, AARE [APPLICATION 1] = 0x61
+/// user-information [30] IMPLICIT = 0xBE
+/// 内含 EXTERNAL (SEQUENCE 0x28):
+///   direct-reference (OID) 或 indirect-reference (INTEGER)
+///   single-ASN1-type [0] → MMS PDU
+fn extract_mms_from_acse(data: &[u8]) -> Result<Option<&[u8]>, ()> {
+    if data.is_empty() {
+        return Err(());
+    }
+
+    // AARQ = 0x60 [APPLICATION 0], AARE = 0x61 [APPLICATION 1]
+    let (tag_byte, _, _, acse_content, _) = parse_ber_tlv(data)?;
+    if tag_byte != 0x60 && tag_byte != 0x61 {
+        return Err(());
+    }
+
+    // 遍历 AARQ/AARE 字段，查找 user-information [30] IMPLICIT = 0xBE
+    let mut pos = acse_content;
+    while !pos.is_empty() {
+        let (tag, _, _, inner, rem) = parse_ber_tlv(pos)?;
+        if tag == 0xBE {
+            // user-information: SEQUENCE OF EXTERNAL
+            // 解析 EXTERNAL (SEQUENCE tag=0x28)
+            if let Ok((ext_tag, _, _, ext_content, _)) = parse_ber_tlv(inner) {
+                if ext_tag == 0x28 {
+                    return extract_mms_from_external(ext_content);
+                }
+            }
+            return Err(());
+        }
+        pos = rem;
+    }
+
+    Err(())
+}
+
+/// 从 EXTERNAL (Association-data) 中提取 MMS PDU。
+/// EXTERNAL 结构：
+///   direct-reference INTEGER (context-id=3 表示 MMS)
+///   single-ASN1-type [0] → MMS PDU
+fn extract_mms_from_external(data: &[u8]) -> Result<Option<&[u8]>, ()> {
+    let mut pos = data;
+    while !pos.is_empty() {
+        let (tag, _, _, inner, rem) = parse_ber_tlv(pos)?;
+        if tag == 0xA0 {
+            // single-ASN1-type [0] → 内部就是 MMS PDU
+            return Ok(Some(inner));
+        }
+        pos = rem;
+    }
+    Err(())
 }
 
 /// 从 Presentation 层 fully-encoded-data 中提取 MMS PDU。
@@ -443,20 +607,70 @@ mod tests {
 
     #[test]
     fn test_session_connect_with_presentation() {
-        // CONNECT SPDU 带 4 字节参数，之后跟 Presentation 层包含 MMS Init
+        // 真实的 CONNECT SPDU，Presentation 层数据在 Session User Data (0xC1) 参数内
+        // 完整的封装路径：Session → C1(User Data) → CP-type(0x31) →
+        //   normal-mode-parameters(0xA2) → user-data(0x61) → PDV-list →
+        //   context-id=1(ACSE) → AARQ(0x60) → user-information(0xBE) →
+        //   EXTERNAL(0x28) → single-ASN1-type(0xA0) → MMS Initiate-Request
+        //
+        // 从 mms.pcap 第 7 包提取的 COTP payload:
         let payload = [
-            0x0D, 0x04,             // CONNECT, length=4
-            0x00, 0x00, 0x00, 0x00, // 4 字节参数（填充）
-            // Presentation 层
-            0x61, 0x0C,
-            0x30, 0x0A,
-            0x02, 0x01, 0x03,       // context-id=3
-            0xA0, 0x05,
-            0xA8, 0x03, 0x80, 0x01, 0x01, // MMS Initiate-Request
+            0x0D, 0x9E, // CONNECT SPDU, length=158
+            // Session 参数:
+            0x05, 0x06, 0x13, 0x01, 0x00, 0x16, 0x01, 0x02, // Connect Accept Item
+            0x14, 0x02, 0x00, 0x02, // Session Requirement
+            0x33, 0x02, 0x00, 0x01, // Calling Session Selector
+            0x34, 0x02, 0x00, 0x01, // Called Session Selector
+            // Session User Data (0xC1), length=0x88=136
+            0xC1, 0x88,
+            // CP-type (SET, 0x31)
+            0x31, 0x81, 0x85,
+            // mode-selector [0]
+            0xA0, 0x03, 0x80, 0x01, 0x01,
+            // normal-mode-parameters [2]
+            0xA2, 0x7E,
+            // calling-presentation-selector
+            0x81, 0x04, 0x00, 0x00, 0x00, 0x01,
+            // called-presentation-selector
+            0x82, 0x04, 0x00, 0x00, 0x00, 0x01,
+            // presentation-context-definition-list
+            0xA4, 0x23,
+            0x30, 0x0F, 0x02, 0x01, 0x01, 0x06, 0x04, 0x52, 0x01, 0x00, 0x01,
+            0x30, 0x04, 0x06, 0x02, 0x51, 0x01,
+            0x30, 0x10, 0x02, 0x01, 0x03, 0x06, 0x05, 0x28, 0xCA, 0x22, 0x02, 0x01,
+            0x30, 0x04, 0x06, 0x02, 0x51, 0x01,
+            // presentation-requirements
+            0x88, 0x02, 0x06, 0x00,
+            // user-data: fully-encoded-data [APPLICATION 1] = 0x61
+            0x61, 0x47,
+            0x30, 0x45, 0x02, 0x01, 0x01, // PDV-list, context-id=1
+            0xA0, 0x40, // single-ASN1-type [0]
+            // ACSE AARQ [APPLICATION 0] = 0x60
+            0x60, 0x3E,
+            0x80, 0x02, 0x07, 0x80, // protocol-version
+            0xA1, 0x07, 0x06, 0x05, 0x28, 0xCA, 0x22, 0x02, 0x03, // aSO-context-name
+            // user-information [30] IMPLICIT = 0xBE
+            0xBE, 0x2F,
+            // EXTERNAL (0x28)
+            0x28, 0x2D,
+            0x02, 0x01, 0x03, // direct-reference = 3
+            // single-ASN1-type [0]
+            0xA0, 0x28,
+            // MMS Initiate-Request [8] = 0xA8
+            0xA8, 0x26,
+            0x80, 0x03, 0x00, 0xFA, 0x00, // localDetailCalling = 64000
+            0x81, 0x01, 0x0A,             // maxServOutstandingCalling = 10
+            0x82, 0x01, 0x0A,             // maxServOutstandingCalled = 10
+            0x83, 0x01, 0x05,             // dataStructureNestingLevel = 5
+            0xA4, 0x16,                   // initRequestDetail
+            0x80, 0x01, 0x01,             // versionNumber = 1
+            0x81, 0x03, 0x05, 0xE1, 0x00, // parameterCBB
+            0x82, 0x0C, 0x03, 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE1, 0x10,
         ];
         match extract_mms_from_session(&payload).unwrap() {
             SessionExtractResult::Init(Some(data)) => {
-                assert_eq!(data[0], 0xA8);
+                assert_eq!(data[0], 0xA8); // MMS Initiate-Request tag
+                assert_eq!(data.len(), 40); // MMS Initiate-Request 的完整 TLV (A8 26 + 38字节内容)
             }
             other => panic!("Expected Init(Some), got {:?}", std::mem::discriminant(&other)),
         }
