@@ -300,8 +300,7 @@ pub(super) fn parse_mms_pdu(input: &[u8]) -> Result<MmsPdu, ()> {
         }
         2 => {
             //解析ConfirmedError确认错误
-            let invoke_id = parse_first_integer(content)?;
-            Ok(MmsPdu::ConfirmedError { invoke_id })
+            parse_confirmed_error(content, 1)
         }
         3 => {
             //解析UnconfirmedPdu未确认 PDU
@@ -873,6 +872,211 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
     })
 }
 
+/// 将 ServiceError.errorClass 的 context tag 号映射为错误类别名称。
+fn error_class_tag_name(tag_num: u32) -> Option<&'static str> {
+    match tag_num {
+        0 => Some("vmd-state"),
+        1 => Some("application-reference"),
+        2 => Some("definition"),
+        3 => Some("resource"),
+        4 => Some("service"),
+        5 => Some("service-preempt"),
+        6 => Some("time-resolution"),
+        7 => Some("access"),
+        8 => Some("initiate"),
+        9 => Some("conclude"),
+        10 => Some("cancel"),
+        11 => Some("file"),
+        12 => Some("others"),
+        _ => None,
+    }
+}
+
+/// 将错误码映射为名称字符串，根据所属的 errorClass 不同含义不同。
+fn error_code_name(error_class_tag: u32, code: u32) -> Option<&'static str> {
+    match error_class_tag {
+        // vmd-state
+        0 => match code {
+            0 => Some("other"),
+            1 => Some("vmd-state-conflict"),
+            2 => Some("vmd-operational-problem"),
+            3 => Some("domain-transfer-problem"),
+            4 => Some("state-machine-id-invalid"),
+            _ => None,
+        },
+        // application-reference
+        1 => match code {
+            0 => Some("other"),
+            1 => Some("aplication-unreachable"),
+            2 => Some("connection-lost"),
+            3 => Some("application-reference-invalid"),
+            4 => Some("context-unsupported"),
+            _ => None,
+        },
+        // definition
+        2 => match code {
+            0 => Some("other"),
+            1 => Some("object-undefined"),
+            2 => Some("invalid-address"),
+            3 => Some("type-unsupported"),
+            4 => Some("type-inconsistent"),
+            5 => Some("object-exists"),
+            6 => Some("object-attribute-inconsistent"),
+            _ => None,
+        },
+        // resource
+        3 => match code {
+            0 => Some("other"),
+            1 => Some("memory-unavailable"),
+            2 => Some("processor-resource-unavailable"),
+            3 => Some("mass-storage-unavailable"),
+            4 => Some("capability-unavailable"),
+            5 => Some("capability-unknown"),
+            _ => None,
+        },
+        // service
+        4 => match code {
+            0 => Some("other"),
+            1 => Some("primitives-out-of-sequence"),
+            2 => Some("object-state-conflict"),
+            3 => Some("pdu-size"),
+            4 => Some("continuation-invalid"),
+            5 => Some("object-constraint-conflict"),
+            _ => None,
+        },
+        // service-preempt
+        5 => match code {
+            0 => Some("other"),
+            1 => Some("timeout"),
+            2 => Some("deadlock"),
+            3 => Some("cancel"),
+            _ => None,
+        },
+        // time-resolution
+        6 => match code {
+            0 => Some("other"),
+            1 => Some("unsupportable-time-resolution"),
+            _ => None,
+        },
+        // access (ServiceError.errorClass.access — 与 DataAccessError 不同!)
+        7 => match code {
+            0 => Some("other"),
+            1 => Some("object-access-unsupported"),
+            2 => Some("object-non-existent"),
+            3 => Some("object-access-denied"),
+            4 => Some("object-invalidated"),
+            _ => None,
+        },
+        // initiate
+        8 => match code {
+            0 => Some("other"),
+            1 => Some("version-incompatible"),
+            2 => Some("max-segment-insufficient"),
+            3 => Some("max-services-outstanding-calling-insufficient"),
+            4 => Some("max-services-outstanding-called-insufficient"),
+            5 => Some("service-CBB-insufficient"),
+            6 => Some("parameter-CBB-insufficient"),
+            7 => Some("nesting-level-insufficient"),
+            _ => None,
+        },
+        // conclude
+        9 => match code {
+            0 => Some("other"),
+            1 => Some("further-communication-required"),
+            _ => None,
+        },
+        // cancel
+        10 => match code {
+            0 => Some("other"),
+            1 => Some("invoke-id-unknown"),
+            2 => Some("cancel-not-possible"),
+            _ => None,
+        },
+        // file
+        11 => match code {
+            0 => Some("other"),
+            1 => Some("filename-ambiguous"),
+            2 => Some("file-busy"),
+            3 => Some("filename-syntax-error"),
+            4 => Some("content-type-invalid"),
+            5 => Some("position-invalid"),
+            6 => Some("file-access-denied"),
+            7 => Some("file-non-existent"),
+            8 => Some("duplicate-filename"),
+            9 => Some("insufficient-space-in-filestore"),
+            _ => None,
+        },
+        // others
+        12 => match code {
+            0 => Some("other"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// 解析 Confirmed-ErrorPDU。
+/// Confirmed-ErrorPDU ::= SEQUENCE {
+///     invokeID         [0] IMPLICIT Unsigned32,
+///     modifierPosition [1] IMPLICIT Unsigned32 OPTIONAL,
+///     serviceError     [2] IMPLICIT ServiceError
+/// }
+/// ServiceError ::= SEQUENCE {
+///     errorClass [0] CHOICE { vmd-state [0], ..., others [12] }
+///     ...
+/// }
+fn parse_confirmed_error(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
+    if depth > MAX_BER_DEPTH {
+        return Err(());
+    }
+
+    let mut invoke_id = 0u32;
+    let mut error_class: Option<String> = None;
+    let mut error_code: Option<String> = None;
+    let mut pos = content;
+
+    while !pos.is_empty() {
+        let (tag_byte, _, tag_num, inner, rem) = parse_ber_tlv(pos)?;
+        match tag_byte {
+            0x02 | 0x80 => {
+                // invokeID: Universal INTEGER (0x02) 或 context [0] (0x80)
+                invoke_id = parse_ber_integer(inner)?;
+            }
+            0x81 => {
+                // modifierPosition [1]：跳过
+            }
+            0xA2 => {
+                // serviceError [2] CONSTRUCTED — 解析内部 errorClass
+                if let Ok((_, _, _, error_class_content, _)) = parse_ber_tlv(inner) {
+                    // errorClass [0] CONSTRUCTED 内部是 CHOICE，
+                    // 每个选项是 context-tagged INTEGER
+                    if let Ok((_, _, ec_tag_num, ec_inner, _)) = parse_ber_tlv(error_class_content) {
+                        error_class = error_class_tag_name(ec_tag_num).map(|s| s.to_string());
+                        if let Ok(code) = parse_ber_integer(ec_inner) {
+                            error_code = error_code_name(ec_tag_num, code)
+                                .map(|s| s.to_string())
+                                .or_else(|| Some(code.to_string()));
+                        }
+                    }
+                }
+            }
+            _ => {
+                // 未知标签，如果是 context [0] constructed 也可能是 invokeID
+                if tag_num == 0 && tag_byte == 0xA0 {
+                    // 某些编码将 errorClass [0] 放在顶层
+                }
+            }
+        }
+        pos = rem;
+    }
+
+    Ok(MmsPdu::ConfirmedError {
+        invoke_id,
+        error_class,
+        error_code,
+    })
+}
+
 /// Parse an Unconfirmed-PDU.
 fn parse_unconfirmed_pdu(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
     if depth > MAX_BER_DEPTH {
@@ -1241,6 +1445,73 @@ mod tests {
     }
 
     // ====== Initiate-Request/Response 深度解析测试 ======
+
+    #[test]
+    fn test_parse_confirmed_error_with_service_error() {
+        // Confirmed-ErrorPDU [2]:
+        //   invokeID = 5
+        //   serviceError [2]:
+        //     errorClass [0]:
+        //       access [7] = 2 (object-non-existent)
+        let data: &[u8] = &[
+            0xA2, 0x0F, // [2] Confirmed-ErrorPDU, length=15
+            0x80, 0x01, 0x05, // [0] invokeID = 5
+            0xA2, 0x0A,       // [2] serviceError
+            0xA0, 0x08,       //   [0] errorClass
+            0x87, 0x01, 0x02, //     [7] access = 2 (object-non-existent)
+            // 后续可能有 additionalCode 等，此处省略
+            0x00, 0x00, 0x00, 0x00, 0x00, // padding (不影响解析)
+        ];
+        let result = parse_mms_pdu(data).unwrap();
+        match result {
+            MmsPdu::ConfirmedError { invoke_id, error_class, error_code } => {
+                assert_eq!(invoke_id, 5);
+                assert_eq!(error_class, Some("access".to_string()));
+                assert_eq!(error_code, Some("object-non-existent".to_string()));
+            }
+            other => panic!("Expected ConfirmedError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_confirmed_error_minimal() {
+        // 仅含 invokeID，无 serviceError
+        let data: &[u8] = &[
+            0xA2, 0x03, // [2] Confirmed-ErrorPDU, length=3
+            0x80, 0x01, 0x07, // [0] invokeID = 7
+        ];
+        let result = parse_mms_pdu(data).unwrap();
+        match result {
+            MmsPdu::ConfirmedError { invoke_id, error_class, error_code } => {
+                assert_eq!(invoke_id, 7);
+                assert_eq!(error_class, None);
+                assert_eq!(error_code, None);
+            }
+            other => panic!("Expected ConfirmedError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_confirmed_error_real_pcap() {
+        // 从 mms.pcap frame 12 提取的真实 ConfirmedError PDU:
+        // invokeID=303731, errorClass=access, errorCode=2 (hardware-fault)
+        let data: &[u8] = &[
+            0xA2, 0x0C,             // [2] Confirmed-ErrorPDU, length=12
+            0x80, 0x03, 0x04, 0xA2, 0x73, // [0] invokeID = 303731
+            0xA2, 0x05,             // [2] serviceError
+            0xA0, 0x03,             //   [0] errorClass
+            0x87, 0x01, 0x02,       //     [7] access = 2
+        ];
+        let result = parse_mms_pdu(data).unwrap();
+        match result {
+            MmsPdu::ConfirmedError { invoke_id, error_class, error_code } => {
+                assert_eq!(invoke_id, 303731);
+                assert_eq!(error_class, Some("access".to_string()));
+                assert_eq!(error_code, Some("object-non-existent".to_string()));
+            }
+            other => panic!("Expected ConfirmedError, got {:?}", other),
+        }
+    }
 
     #[test]
     fn test_parse_initiate_detail_all_fields() {

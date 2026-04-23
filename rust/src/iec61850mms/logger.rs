@@ -169,6 +169,14 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
                 }
             }
         }
+        MmsPdu::ConfirmedError { error_class, error_code, .. } => {
+            if let Some(ref ec) = error_class {
+                js.set_string("error_class", ec)?;
+            }
+            if let Some(ref code) = error_code {
+                js.set_string("error_code", code)?;
+            }
+        }
         MmsPdu::InitiateRequest { detail, .. } | MmsPdu::InitiateResponse { detail, .. } => {
             if let Some(ref d) = detail {
                 if let Some(v) = d.local_detail {

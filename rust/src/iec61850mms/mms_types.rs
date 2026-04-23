@@ -349,6 +349,8 @@ pub enum MmsPdu {
     },
     ConfirmedError {                          // [2] 确认错误
         invoke_id: u32,
+        error_class: Option<String>,          // 错误类别名（如 "access"、"service" 等）
+        error_code: Option<String>,           // 错误码名（如 "object-non-existent"）
     },
     UnconfirmedPdu {                          // [3] 未确认 PDU
         service: MmsUnconfirmedService,
@@ -401,7 +403,7 @@ impl MmsPdu {
         match self {
             MmsPdu::ConfirmedRequest { invoke_id, .. } => Some(*invoke_id),
             MmsPdu::ConfirmedResponse { invoke_id, .. } => Some(*invoke_id),
-            MmsPdu::ConfirmedError { invoke_id } => Some(*invoke_id),
+            MmsPdu::ConfirmedError { invoke_id, .. } => Some(*invoke_id),
             MmsPdu::CancelRequest { invoke_id } => Some(*invoke_id),
             MmsPdu::CancelResponse { invoke_id } => Some(*invoke_id),
             MmsPdu::RejectPdu { invoke_id } => *invoke_id,
@@ -512,7 +514,7 @@ mod tests {
         assert_eq!(MmsPdu::ConcludeResponse.pdu_type_str(), "conclude_response");
         assert_eq!(MmsPdu::ConcludeError.pdu_type_str(), "conclude_error");
         assert_eq!(MmsPdu::CancelError.pdu_type_str(), "cancel_error");
-        assert_eq!(MmsPdu::ConfirmedError { invoke_id: 0 }.pdu_type_str(), "confirmed_error");
+        assert_eq!(MmsPdu::ConfirmedError { invoke_id: 0, error_class: None, error_code: None  }.pdu_type_str(), "confirmed_error");
         assert_eq!(MmsPdu::RejectPdu { invoke_id: None }.pdu_type_str(), "reject");
         assert_eq!(MmsPdu::CancelRequest { invoke_id: 0 }.pdu_type_str(), "cancel_request");
         assert_eq!(MmsPdu::CancelResponse { invoke_id: 0 }.pdu_type_str(), "cancel_response");
@@ -550,7 +552,7 @@ mod tests {
         // 其他类型 → None
         assert_eq!(MmsPdu::ConcludeRequest.service_str(), None);
         assert_eq!(MmsPdu::InitiateRequest { detail: None }.service_str(), None);
-        assert_eq!(MmsPdu::ConfirmedError { invoke_id: 0 }.service_str(), None);
+        assert_eq!(MmsPdu::ConfirmedError { invoke_id: 0, error_class: None, error_code: None }.service_str(), None);
     }
 
     #[test]
@@ -575,7 +577,7 @@ mod tests {
         assert_eq!(pdu.invoke_id(), Some(7));
 
         // ConfirmedError
-        assert_eq!(MmsPdu::ConfirmedError { invoke_id: 3 }.invoke_id(), Some(3));
+        assert_eq!(MmsPdu::ConfirmedError { invoke_id: 3, error_class: None, error_code: None }.invoke_id(), Some(3));
 
         // CancelRequest / CancelResponse
         assert_eq!(MmsPdu::CancelRequest { invoke_id: 10 }.invoke_id(), Some(10));
