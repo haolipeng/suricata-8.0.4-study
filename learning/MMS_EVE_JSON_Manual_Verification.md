@@ -43,10 +43,10 @@ cat "$OUT/s1/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_m
 #### 预期输出（共 8 条）
 
 ```json
-{ "direction": "request",  "pdu_type": "initiate_request" }
-{ "direction": "response", "pdu_type": "initiate_response" }
+{ "direction": "request",  "pdu_type": "initiate_request",  "local_detail": 64000, "max_serv_outstanding_calling": 10, "max_serv_outstanding_called": 10, "data_structure_nesting_level": 5, "version_number": 1, "supported_services": "a00000000000000000e110" }
+{ "direction": "response", "pdu_type": "initiate_response", "local_detail": 32000, "max_serv_outstanding_calling": 10, "max_serv_outstanding_called": 8, "data_structure_nesting_level": 5, "version_number": 1, "supported_services": "ee0800000400000001ed18" }
 { "direction": "request",  "pdu_type": "confirmed_request",  "invoke_id": 303731, "service": "get_variable_access_attributes", "variable": { "scope": "domain_specific", "domain": "AA1E1Q01FP2LD0", "item": "LLN0$BR$rcb_B02" } }
-{ "direction": "response", "pdu_type": "confirmed_error",    "invoke_id": 303731 }
+{ "direction": "response", "pdu_type": "confirmed_error",    "invoke_id": 303731, "error_class": "access", "error_code": "object-non-existent" }
 { "direction": "request",  "pdu_type": "confirmed_request",  "invoke_id": 303732, "service": "read", "variables": [{ "scope": "domain_specific", "domain": "AA1E1Q01FP2LD0", "item": "LLN0$BR$rcb_B02" }] }
 { "direction": "response", "pdu_type": "confirmed_response", "invoke_id": 303732, "service": "read", "result_count": 0, "results": [] }
 { "direction": "request",  "pdu_type": "conclude_request" }
@@ -55,8 +55,10 @@ cat "$OUT/s1/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_m
 
 #### 验证要点
 
+- Initiate 请求/响应包含完整协商参数（`local_detail`、`version_number`、`supported_services` 等）
+- `supported_services` 为纯位图 hex，不含 BIT STRING 的 unused bits 前缀字节
 - GVAA 服务正确识别，`variable` 含 scope/domain/item
-- 服务端返回 `confirmed_error`，解析器正确识别
+- 服务端返回 `confirmed_error`，含 `error_class` 和 `error_code` 名称
 - Read 响应深度解析出 `result_count` 和 `results`
 - 无空事务（COTP CR/CC 不创建事务）
 
