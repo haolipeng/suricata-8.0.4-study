@@ -248,7 +248,7 @@ ObjectName ::= CHOICE {
 | `mms_deletable` | `bool` | 是否可被 MMS 删除 |
 | `type_description` | `Option<String>` | 顶层类型名（如 "structure"、"boolean"、"integer" 等） |
 
-TypeDescription tag 映射：`[0]`=array, `[1]`=structure, `[2]`=boolean, `[3]`=bit-string, `[4]`=integer, `[5]`=unsigned, `[6]`=floating-point, `[7]`=octet-string, `[9]`=visible-string, `[10]`=generalized-time, `[12]`=binary-time, `[14]`=utc-time
+TypeDescription tag 映射：`[1]`=array, `[2]`=structure, `[3]`=boolean, `[4]`=bit-string, `[5]`=integer, `[6]`=unsigned, `[7]`=floating-point, `[9]`=octet-string, `[10]`=visible-string, `[11]`=generalized-time, `[12]`=binary-time, `[13]`=bcd, `[15]`=obj-id, `[16]`=mms-string, `[17]`=utc-time（注：`[0]` 为 typeName 引用，`[8]` 保留未实现）
 
 日志输出示例：
 ```json
@@ -418,7 +418,7 @@ Request：
 | `data_type` | `Option<String>` | 类型名（如 "boolean"、"integer"、"structure" 等） |
 | `value` | `Option<String>` | 值的字符串表示（structure/array 不递归展开，标注 "N items"） |
 
-Data tag 映射：`[1]`=boolean, `[2]`=bit-string, `[3]`=integer, `[4]`=unsigned, `[5]`=floating-point, `[6]`=octet-string, `[7]`=visible-string, `[8]`=generalized-time, `[9]`=binary-time, `[10]`=bcd, `[11]`=boolean-array, `[12]`=obj-id, `[13]`=mms-string, `[14]`=utc-time
+Data tag 映射（`data_tag_name()` 函数实际支持）：`[1]`=array, `[2]`=structure, `[3]`=boolean, `[4]`=bit-string, `[5]`=integer, `[6]`=unsigned, `[7]`=floating-point, `[9]`=octet-string, `[10]`=visible-string, `[12]`=binary-time, `[16]`=mms-string, `[17]`=utc-time（注：`[8]` 保留，`[11]` generalized-time、`[13]` bcd、`[14]` boolean-array、`[15]` obj-id 在代码中暂未映射）
 
 日志输出示例：
 ```json
@@ -439,6 +439,93 @@ Data tag 映射：`[1]`=boolean, `[2]`=bit-string, `[3]`=integer, `[4]`=unsigned
 
 ---
 
+## 6. Write Confirmed-Request
+
+### ASN.1 结构
+
+```
+Write-Request ::= SEQUENCE {
+    variableAccessSpecification VariableAccessSpecification,
+    listOfData [0] IMPLICIT SEQUENCE OF Data
+}
+```
+
+### 解析字段（`MmsWriteRequest`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `variable_specs` | `Vec<ObjectNameRef>` | 写入请求中引用的变量列表 |
+
+解析器仅提取 `variableAccessSpecification` 中的变量名引用列表，不解析 `listOfData` 中的写入数据值。
+
+**解析深度：4~5 层嵌套**（与 Read Request 相同的变量访问规格路径）
+
+### 日志输出示例
+
+```json
+{
+  "pdu_type": "confirmed_request",
+  "service": "write",
+  "variables": [
+    { "scope": "domain_specific", "domain": "LD1", "item": "CSWI1$Oper$ctlVal" }
+  ]
+}
+```
+
+### 未解析内容
+
+- `listOfData`：写入数据值未提取（仅提取变量引用）
+
+---
+
+## 7. UnconfirmedPdu
+
+### ASN.1 结构
+
+```
+Unconfirmed-PDU ::= SEQUENCE {
+    unconfirmedService UnconfirmedService
+}
+
+UnconfirmedService ::= CHOICE {
+    informationReport  [0] InformationReport,
+    unsolicitedStatus  [1] UnsolicitedStatus,
+    eventNotification  [2] EventNotification
+}
+```
+
+### 解析字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `service` | `MmsUnconfirmedService` | 未确认服务类型 |
+
+**`MmsUnconfirmedService` 枚举：**
+
+| Tag | 值 | 说明 |
+|-----|----|----|
+| `[0]` | `InformationReport` | 信息报告（IED 主动上报数据） |
+| `[1]` | `UnsolicitedStatus` | 主动状态上报 |
+| `[2]` | `EventNotification` | 事件通知 |
+
+**解析深度：1 层**（仅解析到服务类型标签，不深入解析服务内容）
+
+### 日志输出示例
+
+```json
+{
+  "pdu_type": "unconfirmed",
+  "service": "information_report"
+}
+```
+
+### 未解析内容
+
+- InformationReport 内部的变量引用和数据值未深度解析
+- UnsolicitedStatus / EventNotification 内部字段未解析
+
+---
+
 ## 总览对比
 
 | PDU 类型 | 方向 | 最大嵌套深度 | 解析字段数 | 列表上限 | Response 深度解析 |
@@ -452,7 +539,31 @@ Data tag 映射：`[1]`=boolean, `[2]`=bit-string, `[3]`=integer, `[4]`=unsigned
 | GetNamedVarListAttr | Response | 4 层 | 2 + 变量列表 | 32 条 | ✅ |
 | Read | Request | 5 层 | 变量列表 | — | — |
 | Read | Response | 1 层 | 结果列表 | 64 条 | ✅ |
+| Write | Request | 5 层 | 变量列表 | — | — |
+| Write | Response | — | — | — | ⚠️ 不解析数据值 |
+| UnconfirmedPdu | — | 1 层 | 服务类型 | — | ⚠️ 仅识别服务类型 |
+| ConfirmedError | — | 1 层 | invoke_id | — | — |
+| RejectPdu | — | 1 层 | invoke_id (optional) | — | — |
+| Cancel (Req/Resp) | — | 1 层 | invoke_id | — | — |
+| CancelError / InitiateError / ConcludeReq/Resp/Error | — | 0 层 | 无字段 | — | — |
 
 ### 共享基础组件
 
 所有涉及变量引用的 PDU 类型共用 `ObjectNameRef` 枚举和 `parse_object_name()` 函数，支持三种 ObjectName 变体的统一解析。DomainSpecific 变体通过 `parse_domain_specific_sequence()` 提取 `domainId` + `itemId` 二元组。
+
+### 容限保护汇总
+
+| 容限项 | 上限值 | 说明 |
+|--------|--------|------|
+| GetNameList 响应标识符数 | 64 条 | 防止超长列表占用过多内存 |
+| GetNamedVarListAttr 响应变量数 | 32 条 | 数据集变量列表截断 |
+| Read 响应���果数 | 64 条 | AccessResult 列表截断 |
+| BER 递归解析深度 (`MAX_BER_DEPTH`) | 16 层 | 防止恶意嵌套导致栈溢出 |
+| COTP 分片重组缓冲区 | 1 MB | 防止内存耗尽 |
+| 流中最大事务数 | 256 个 | 限制单连接并发状态 |
+
+### 确认服务识别范围
+
+解析器可识别 **38 种确认服务类型**（`MmsConfirmedService` 枚举），其中 6 种有深度解析（GetNameList、Read、Write、GetVariableAccessAttributes、GetNamedVariableListAttributes + Initiate），其余服务仅记录服务类型名称和 invoke_id。
+
+完整确认服务列表：Status、GetNameList、Identify、Rename、Read、Write、GetVariableAccessAttributes、GetCapabilityList、DefineNamedVariableList、GetNamedVariableListAttributes、DeleteNamedVariableList、TakeControl、RelinquishControl、InitiateDownloadSequence、DownloadSegment、TerminateDownloadSequence、InitiateUploadSequence、UploadSegment、TerminateUploadSequence、RequestDomainDownload、RequestDomainUpload、LoadDomainContent、StoreDomainContent、DeleteDomain、GetDomainAttributes、CreateProgramInvocation、DeleteProgramInvocation、Start、Stop、Resume、Reset、Kill、GetProgramInvocationAttributes、GetAlarmSummary、ObtainFile、FileOpen、FileRead、FileClose、FileRename、FileDelete、FileDirectory。

@@ -4,23 +4,32 @@
 
 ## 1. 协议栈总览
 
+IEC 61850 MMS 使用完整的 OSI 上三层协议栈。**建链阶段与数据传输阶段的封装路径不同：**
+
 ```
-┌────────────────────────────┐
-│       MMS (ISO 9506)       │  ← 应用层：MMS PDU
-├────────────────────────────┤
-│  Presentation (ISO 8823)   │  ← 表示层：fully-encoded-data 封装
-├────────────────────────────┤
-│    Session (ISO 8327)      │  ← 会话层：SPDU（连接管理 + 数据传输）
-├────────────────────────────┤
-│    COTP (ISO 8073)         │  ← 传输层：连接管理 + 分片重组
-├────────────────────────────┤
-│    TPKT (RFC 1006)         │  ← 适配层：在 TCP 上模拟 OSI 传输
-├────────────────────────────┤
-│         TCP                │
-└────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ 阶段         │ 建链（Initiate）       │ 数据传输（Data）         │
+├──────────────┼────────────────────────┼──────────────────────┤
+│ 应用层       │ ACSE (ISO 8650-1)      │ MMS (ISO 9506)        │
+│              │  └── MMS Initiate PDU  │                      │
+├──────────────┼────────────────────────┼──────────────────────┤
+│ 表示层       │ Presentation CP-type   │ Presentation          │
+│              │ (ISO 8823)             │ fully-encoded-data   │
+├──────────────┼────────────────────────┼──────────────────────┤
+│ 会话层       │ Session CONNECT/ACCEPT │ Session GT + DT       │
+│              │ (ISO 8327)             │ (ISO 8327)           │
+├──────────────┼────────────────────────┼──────────────────────┤
+│ 传输层       │ COTP (ISO 8073)        │ COTP (ISO 8073)       │
+├──────────────┼────────────────────────┼──────────────────────┤
+│ 适配层       │ TPKT (RFC 1006)        │ TPKT (RFC 1006)       │
+├──────────────┼────────────────────────┼──────────────────────┤
+│              │ TCP                    │ TCP                  │
+└──────────────┴────────────────────────┴──────────────────────┘
 ```
 
-在 IEC 61850 环境中，实际网络使用 TCP/IP，通过 TPKT 适配层映射到 OSI 传输服务。
+关键区别：
+- **建链阶段**：MMS Initiate PDU 被 ACSE（关联控制）包裹后再经 Presentation → Session
+- **数据传输阶段**：MMS PDU 直接放在 Presentation 的 PDV-list 中，无 ACSE 封装
 
 ## 2. TPKT 层（RFC 1006）
 
@@ -146,38 +155,74 @@ MMS 数据传输使用 Give Tokens + Data Transfer 的组合模式：
 
 ### 连接阶段
 
-Session CONNECT/ACCEPT 携带会话参数，之后可能跟 Presentation 层数据（含 MMS Initiate PDU）：
+Session CONNECT/ACCEPT SPDU 的 Presentation 层数据**不在 Session 头部之后**，而是**嵌套在 Session 参数列表的 User Data (0xC1) 参数内部**。
 
 ```
-┌─────────────────────────┬──────────────────────────────┐
-│ CN/AC: type + len + params │ Presentation data (可选)    │
-└─────────────────────────┴──────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ CN/AC: type(1) + length(1~3) + 参数列表                           │
+│   ├── Connect Accept Item (05) : 协议选项、版本号                    │
+│   ├── Session Requirement (14) : 功能单元协商                        │
+│   ├── Calling Session Selector (33)                               │
+│   ├── Called Session Selector (34)                                │
+│   └── Session User Data (C1) : ← Presentation 层数据在这里         │
+│         └── CP-type (0x31) → Presentation 层                      │
+└──────────────────────────────────────────────────────────────────┘
 ```
+
+Session 参数列表是 TLV 序列（type 1 字节 + length + value），需逐个遍历查找 `0xC1`。
+
+> **常见错误**：将 Session SPDU 的 length 字段理解为"头部参数长度"，然后假设 Presentation 数据紧跟参数之后。实际上 length 覆盖了全部参数（包含 User Data），Presentation 数据在 `0xC1` 参数的 value 内部。
 
 ## 5. Presentation 层（ISO 8823）
 
-### fully-encoded-data 结构
+Presentation 层在建链阶段和数据传输阶段使用**不同的封装格式**。
 
-Presentation 层使用 `fully-encoded-data [APPLICATION 1]`（tag byte = `0x61`）封装 PDV-list：
+### 5.1 数据传输阶段：fully-encoded-data
+
+数据传输阶段使用 `fully-encoded-data [APPLICATION 1]`（tag byte = `0x61`）封装 PDV-list，MMS PDU 直接在 context-id=3 的条目中：
 
 ```
 fully-encoded-data [APPLICATION 1] (0x61)
   └── PDV-list: SEQUENCE (0x30)
-        ├── presentation-context-identifier: INTEGER (0x02)
+        ├── presentation-context-identifier: INTEGER (0x02) = 3
         └── single-ASN1-type [0] (0xA0)
-              └── MMS PDU data
+              └── MMS PDU data（直接是 Confirmed-Request/Response 等）
 ```
+
+### 5.2 建链阶段：CP-type / CPA-type
+
+建链阶段使用 `CP-type` (CONNECT) 或 `CPA-type` (ACCEPT)，外层标签为 SET (0x31)，结构更复杂：
+
+```
+CP-type / CPA-type: SET (0x31)
+  ├── mode-selector [0] (0xA0)
+  │     └── mode-value: INTEGER = 1 (normal-mode)
+  └── normal-mode-parameters [2] (0xA2)
+        ├── calling-presentation-selector [1] (0x81)
+        ├── called-presentation-selector [2] (0x82)
+        ├── presentation-context-definition-list [4] (0xA4)    ← 上下文协商
+        │     ├── Context-list item: ctx-id=1, abstract-syntax=id-as-acse
+        │     └── Context-list item: ctx-id=3, abstract-syntax=mms-abstract-syntax
+        ├── presentation-requirements [8] (0x88)
+        └── user-data: fully-encoded-data [APPLICATION 1] (0x61)
+              └── PDV-list: SEQUENCE (0x30)
+                    ├── context-id = 1 (ACSE)     ← 建链阶段走这里
+                    └── single-ASN1-type [0] (0xA0)
+                          └── ACSE AARQ/AARE PDU   ← 不是直接的 MMS PDU！
+```
+
+> **关键区别**：数据传输阶段的 PDV-list 中 context-id=3 直接包含 MMS PDU；建链阶段的 PDV-list 中 context-id=1 包含 ACSE PDU，MMS Initiate PDU 嵌套在 ACSE 的 user-information 中。
 
 ### presentation-context-id
 
 PDV-list 中每个条目携带一个 `presentation-context-id`（INTEGER），标识数据属于哪个应用上下文：
 
-- **context-id = 3**：MMS 上下文（最常见）
-- **context-id = 1**：MMS 上下文（部分实现）
+- **context-id = 1**：ACSE 上下文（建链阶段使用）
+- **context-id = 3**：MMS 上下文（数据传输阶段使用）
 
 这个 ID 在 Session CONNECT/ACCEPT 阶段通过 Presentation 层的 Context Definition List 协商确定。严格实现应该解析协商结果，但实际中硬编码 `3 || 1` 是常见的简化做法。
 
-### 解封装流程
+### 解封装流程（数据传输阶段）
 
 ```
 Presentation data
@@ -197,7 +242,47 @@ Presentation data
   └─ 未找到 MMS context → 错误
 ```
 
-## 6. 完整解封装示例
+## 6. ACSE 层（ISO 8650-1）— 仅建链阶段
+
+ACSE（Association Control Service Element）仅在建链阶段使用，负责建立和释放应用关联。MMS Initiate PDU 嵌套在 ACSE 的 user-information 字段中。
+
+### AARQ / AARE 结构
+
+```
+AARQ [APPLICATION 0] (0x60)  — 关联请求（对应 MMS Initiate-Request）
+AARE [APPLICATION 1] (0x61)  — 关联响应（对应 MMS Initiate-Response）
+  ├── protocol-version [0] (0x80)
+  ├── aSO-context-name [1] (0xA1): OID = 1.0.9506.2.3 (MMS)
+  ├── ... (其他可选字段)
+  └── user-information [30] IMPLICIT (0xBE)
+        └── EXTERNAL: SEQUENCE (0x28)
+              ├── direct-reference: INTEGER = 3 (MMS context)
+              └── single-ASN1-type [0] (0xA0)
+                    └── MMS Initiate-Request/Response PDU  ← 最终目标
+```
+
+### 建链阶段完整解封装路径
+
+```
+Session CONNECT/ACCEPT SPDU
+  → 遍历参数列表，找到 Session User Data (0xC1)
+    → Presentation CP-type SET (0x31)
+      → normal-mode-parameters [2] (0xA2)
+        → user-data: fully-encoded-data (0x61)
+          → PDV-list: context-id=1
+            → single-ASN1-type [0] (0xA0)
+              → ACSE AARQ [APPLICATION 0] (0x60) / AARE (0x61)
+                → user-information [30] (0xBE)
+                  → EXTERNAL (0x28)
+                    → single-ASN1-type [0] (0xA0)
+                      → MMS Initiate-Request / Initiate-Response PDU
+```
+
+> **嵌套深度**：从 COTP payload 到 MMS Initiate PDU 共经过 **8 层**解封装。这是 OSI 协议栈的固有开销，也是 IEC 61850 MMS 解析器实现难度的主要来源。
+
+## 7. 完整解封装示例
+
+### 7.1 数据传输阶段示例
 
 一个 MMS Conclude-Request 通过 Give Tokens + Data Transfer 模式传输：
 
@@ -220,7 +305,56 @@ Presentation data
 4. Presentation: 0x61 → PDV-list → context-id=3 → wrapper 0xA0
 5. MMS: tag_byte=0xAB → tag_num=11 → ConcludeRequest
 
-## 7. 连接状态机
+### 7.2 建链阶段示例
+
+MMS Initiate-Request 经 Session CONNECT → Presentation CP-type → ACSE AARQ 传输（摘自 mms.pcap 第 7 包）：
+
+```hex
+03 00 00 A7          TPKT: version=3, length=167
+02 F0 80             COTP DT: length=2, type=0xF0, EOT=1
+0D 9E                Session CONNECT, length=158
+  05 06 ...          Session 参数: Connect Accept Item, Requirement 等
+  C1 88              Session User Data (type=0xC1, length=136)
+    31 81 85           Presentation CP-type SET, length=133
+      A0 03 ...          mode-selector: normal-mode (1)
+      A2 7E              normal-mode-parameters, length=126
+        81 04 ...          calling-presentation-selector
+        82 04 ...          called-presentation-selector
+        A4 23              context-definition-list
+          30 0F ...          ctx-id=1: id-as-acse (ACSE 上下文)
+          30 10 ...          ctx-id=3: mms-abstract-syntax (MMS 上下文)
+        88 02 06 00        presentation-requirements
+        61 47              user-data: fully-encoded-data, length=71
+          30 45              PDV-list SEQUENCE
+            02 01 01           context-id=1 (ACSE)
+            A0 40              single-ASN1-type wrapper
+              60 3E              ACSE AARQ [APPLICATION 0], length=62
+                80 02 07 80          protocol-version
+                A1 07 ...            aSO-context-name = 1.0.9506.2.3 (MMS)
+                BE 2F                user-information, length=47
+                  28 2D                EXTERNAL SEQUENCE
+                    02 01 03             direct-reference = 3
+                    A0 28                single-ASN1-type wrapper, length=40
+                      A8 26              ★ MMS Initiate-Request [8], length=38
+                        80 03 00 FA 00     localDetailCalling = 64000
+                        81 01 0A           maxServOutstandingCalling = 10
+                        82 01 0A           maxServOutstandingCalled = 10
+                        83 01 05           dataStructureNestingLevel = 5
+                        A4 16              initRequestDetail
+                          80 01 01           versionNumber = 1
+                          81 03 ...          parameterCBB
+                          82 0C ...          servicesSupportedCalling
+```
+
+解析顺序：
+1. TPKT → COTP DT(EOT=1) → 160 字节 COTP payload
+2. Session: CONNECT(0x0D) → 遍历参数找 User Data(0xC1) → 136 字节
+3. Presentation: CP-type(0x31) → normal-mode(0xA2) → user-data(0x61) → PDV-list
+4. PDV-list: context-id=1 → single-ASN1-type(0xA0) → ACSE AARQ(0x60)
+5. ACSE: user-information(0xBE) → EXTERNAL(0x28) → single-ASN1-type(0xA0)
+6. MMS: Initiate-Request(0xA8) → 解析协商参数
+
+## 8. 连接状态机
 
 MMS 会话从建立到关闭的完整流程：
 
@@ -245,4 +379,5 @@ MMS 会话从建立到关闭的完整流程：
 - ISO 8073: OSI Connection-Oriented Transport Protocol (COTP)
 - ISO 8327-1: OSI Session Protocol
 - ISO 8823: OSI Presentation Protocol (Connection-Oriented)
+- ISO 8650-1: OSI Association Control Service Element (ACSE)
 - IEC 61850-8-1: 通信网络和系统的通信映射
