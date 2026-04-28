@@ -78,10 +78,24 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
             }
             if let Some(ref wi) = write_info {
                 if !wi.variable_specs.is_empty() {
-                    js.open_array("variables")?;
+                    js.open_array("write_variables")?;
                     for spec in &wi.variable_specs {
                         js.start_object()?;
                         log_object_name_ref(spec, js)?;
+                        js.close()?;
+                    }
+                    js.close()?;
+                }
+                if !wi.data.is_empty() {
+                    js.open_array("write_data")?;
+                    for d in &wi.data {
+                        js.start_object()?;
+                        if let Some(ref dt) = d.data_type {
+                            js.set_string("data_type", dt)?;
+                        }
+                        if let Some(ref v) = d.value {
+                            js.set_string("value", v)?;
+                        }
                         js.close()?;
                     }
                     js.close()?;
@@ -225,4 +239,91 @@ pub unsafe extern "C" fn SCIec61850MmsLoggerLog(
     let tx = cast_pointer!(tx, MmsTransaction);
     let js = cast_pointer!(js, JsonBuilder);
     log_iec61850_mms(tx, js).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::iec61850mms::mms_types::*;
+
+    /// Helper: call log_mms_pdu and return the JSON string via Debug output.
+    fn log_pdu_to_debug_string(pdu: &MmsPdu) -> String {
+        let mut js = JsonBuilder::try_new_object().unwrap();
+        log_mms_pdu(pdu, &mut js).expect("log_mms_pdu should not fail");
+        js.close().unwrap();
+        format!("{:?}", js)
+    }
+
+    #[test]
+    fn test_log_write_request_single_variable_with_data() {
+        let pdu = MmsPdu::ConfirmedRequest {
+            invoke_id: 1,
+            service: MmsConfirmedService::Write,
+            read_info: None,
+            write_info: Some(MmsWriteRequest {
+                variable_specs: vec![ObjectNameRef::DomainSpecific {
+                    domain_id: "LLN0".to_string(),
+                    item_id: "Mod".to_string(),
+                }],
+                data: vec![MmsAccessResult {
+                    success: true,
+                    data_type: Some("boolean".to_string()),
+                    value: Some("true".to_string()),
+                }],
+            }),
+            get_name_list_info: None,
+            get_var_access_attr_info: None,
+            get_named_var_list_attr_info: None,
+        };
+        let debug = log_pdu_to_debug_string(&pdu);
+        // Verify write_variables is present (not just "variables")
+        assert!(debug.contains("write_variables"), "should contain write_variables, got: {}", debug);
+        assert!(debug.contains("write_data"), "should contain write_data, got: {}", debug);
+        assert!(debug.contains("LLN0"), "should contain domain LLN0");
+        assert!(debug.contains("boolean"), "should contain data_type boolean");
+        assert!(debug.contains("true"), "should contain value true");
+    }
+
+    #[test]
+    fn test_log_write_request_multiple_variables_and_data() {
+        let pdu = MmsPdu::ConfirmedRequest {
+            invoke_id: 2,
+            service: MmsConfirmedService::Write,
+            read_info: None,
+            write_info: Some(MmsWriteRequest {
+                variable_specs: vec![
+                    ObjectNameRef::DomainSpecific {
+                        domain_id: "IED1_LD0".to_string(),
+                        item_id: "XCBR1$CO$Pos".to_string(),
+                    },
+                    ObjectNameRef::VmdSpecific("GlobalVar".to_string()),
+                ],
+                data: vec![
+                    MmsAccessResult {
+                        success: true,
+                        data_type: Some("structure".to_string()),
+                        value: Some("4 items".to_string()),
+                    },
+                    MmsAccessResult {
+                        success: true,
+                        data_type: Some("integer".to_string()),
+                        value: Some("42".to_string()),
+                    },
+                ],
+            }),
+            get_name_list_info: None,
+            get_var_access_attr_info: None,
+            get_named_var_list_attr_info: None,
+        };
+        let debug = log_pdu_to_debug_string(&pdu);
+        // 两个变量
+        assert!(debug.contains("IED1_LD0"), "should contain domain IED1_LD0");
+        assert!(debug.contains("XCBR1$CO$Pos"), "should contain item XCBR1$CO$Pos");
+        assert!(debug.contains("GlobalVar"), "should contain vmd_specific GlobalVar");
+        // 两个数据
+        assert!(debug.contains("structure"), "should contain data_type structure");
+        assert!(debug.contains("4 items"), "should contain value 4 items");
+        assert!(debug.contains("integer"), "should contain data_type integer");
+        assert!(debug.contains("42"), "should contain value 42");
+    }
 }
