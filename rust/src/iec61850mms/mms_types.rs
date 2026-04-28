@@ -236,6 +236,7 @@ pub struct MmsReadRequest {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MmsWriteRequest {
     pub variable_specs: Vec<ObjectNameRef>, // Write 请求中引用的变量列表
+    pub data: Vec<MmsAccessResult>,         // Write 请求中的数据值列表（浅层解析）
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

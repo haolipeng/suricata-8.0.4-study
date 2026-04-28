@@ -40,6 +40,9 @@
 use super::ber::{parse_ber_integer, parse_ber_signed_integer, parse_ber_string, parse_ber_tlv, MAX_BER_DEPTH};
 use super::mms_types::*;
 
+/// Maximum number of variable specifications to parse from a single request.
+const MAX_VARIABLE_SPECS: usize = 64;
+
 /// Extract domain-specific object references from a Read/Write request.
 /// The variable access specification in MMS uses nested constructed tags.
 fn parse_variable_access_specification(content: &[u8], depth: usize) -> Vec<ObjectNameRef> {
@@ -51,7 +54,7 @@ fn parse_variable_access_specification(content: &[u8], depth: usize) -> Vec<Obje
     if let Ok((tag_byte, _, _, inner, _)) = parse_ber_tlv(content) {
         if tag_byte == 0xA0 {
             let mut pos = inner;
-            while !pos.is_empty() {
+            while !pos.is_empty() && specs.len() < MAX_VARIABLE_SPECS {
                 if let Ok((_, _, _, seq_content, rem)) = parse_ber_tlv(pos) {
                     if let Some(name) = extract_object_name_from_var_spec(seq_content, depth + 1) {
                         specs.push(name);
@@ -405,11 +408,9 @@ fn parse_confirmed_request(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
             }
         }
         MmsConfirmedService::Write => {
-            let specs = parse_write_request(service_content, depth + 1);
-            if !specs.is_empty() {
-                write_info = Some(MmsWriteRequest {
-                    variable_specs: specs,
-                });
+            let wi = parse_write_request(service_content, depth + 1);
+            if !wi.variable_specs.is_empty() || !wi.data.is_empty() {
+                write_info = Some(wi);
             }
         }
         MmsConfirmedService::GetNameList => {
@@ -455,16 +456,112 @@ fn parse_read_request(content: &[u8], depth: usize) -> Vec<ObjectNameRef> {
     Vec::new()
 }
 
-/// Parse Write request body to extract variable specifications.
-fn parse_write_request(content: &[u8], depth: usize) -> Vec<ObjectNameRef> {
+/// Parse Write request body to extract variable specifications and data values.
+fn parse_write_request(content: &[u8], depth: usize) -> MmsWriteRequest {
     // WriteRequest ::= SEQUENCE {
     //   variableAccessSpecification VariableAccessSpecification,
     //   listOfData [0] IMPLICIT SEQUENCE OF Data
     // }
-    if let Ok((_, _, _, inner, _)) = parse_ber_tlv(content) {
-        return parse_variable_access_specification(inner, depth + 1);
+    // 两个字段都使用 [0] tag：variableAccessSpecification 的 listOfVariable [0]
+    // 和 listOfData [0]。靠位置顺序区分：第一个是变量列表，第二个是数据列表。
+    let mut result = MmsWriteRequest::default();
+
+    if let Ok((_, _, _, _var_inner, rem)) = parse_ber_tlv(content) {
+        // 第一个 TLV：variableAccessSpecification
+        // var_inner 已经是 listOfVariable [0] 的内容，
+        // 但 parse_variable_access_specification 需要看到完整的 [0] tag，
+        // 所以传入原始 content 让它自己解析。
+        result.variable_specs = parse_variable_access_specification(content, depth + 1);
+
+        // 第二个 TLV：listOfData [0]
+        if let Ok((tag_byte, _, _, data_inner, _)) = parse_ber_tlv(rem) {
+            if tag_byte == 0xA0 {
+                result.data = parse_data_list(data_inner, depth + 1);
+            }
+        }
     }
-    Vec::new()
+
+    result
+}
+
+/// Parse a list of MMS Data elements with shallow interpretation.
+/// Used by both Write request (listOfData) and Read response (listOfAccessResult success items).
+fn parse_data_list(content: &[u8], depth: usize) -> Vec<MmsAccessResult> {
+    let mut results = Vec::new();
+    if depth > MAX_BER_DEPTH {
+        return results;
+    }
+    let mut pos = content;
+    while !pos.is_empty() && results.len() < MAX_VARIABLE_SPECS {
+        if let Ok((item_tag, _, item_tag_num, item_inner, item_rem)) = parse_ber_tlv(pos) {
+            results.push(parse_data_element(item_tag, item_tag_num, item_inner));
+            pos = item_rem;
+        } else {
+            break;
+        }
+    }
+    results
+}
+
+/// Parse a single MMS Data element into an MmsAccessResult (shallow).
+fn parse_data_element(item_tag: u8, item_tag_num: u32, item_inner: &[u8]) -> MmsAccessResult {
+    let type_name = data_tag_name(item_tag_num).map(|s| s.to_string());
+
+    let value = if item_tag == 0xA1 || item_tag == 0xA2 {
+        // array [1] / structure [2]: count members
+        let mut count = 0u32;
+        let mut cpos = item_inner;
+        while !cpos.is_empty() {
+            if let Ok((_, _, _, _, crem)) = parse_ber_tlv(cpos) {
+                count += 1;
+                cpos = crem;
+            } else {
+                break;
+            }
+        }
+        Some(format!("{} items", count))
+    } else if item_tag == 0x83 {
+        // [3] boolean
+        if !item_inner.is_empty() {
+            Some(if item_inner[0] != 0 { "true" } else { "false" }.to_string())
+        } else {
+            None
+        }
+    } else if item_tag == 0x85 {
+        // [5] integer (signed)
+        parse_ber_signed_integer(item_inner).map(|v| v.to_string()).ok()
+    } else if item_tag == 0x86 {
+        // [6] unsigned
+        parse_ber_integer(item_inner).map(|v| v.to_string()).ok()
+    } else if item_tag == 0x87 {
+        // [7] floating-point
+        if item_inner.len() == 5 {
+            let bytes = [item_inner[1], item_inner[2], item_inner[3], item_inner[4]];
+            Some(format!("{}", f32::from_be_bytes(bytes)))
+        } else if item_inner.len() == 9 {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&item_inner[1..9]);
+            Some(format!("{}", f64::from_be_bytes(bytes)))
+        } else {
+            None
+        }
+    } else if item_tag == 0x89 || item_tag == 0x8A || item_tag == 0x90 {
+        // [9] octet-string, [10] visible-string, [16] mms-string
+        Some(parse_ber_string(item_inner))
+    } else {
+        // 其他类型：hex 表示
+        if !item_inner.is_empty() {
+            Some(item_inner.iter().map(|b| format!("{:02x}", b)).collect())
+        } else {
+            None
+        }
+    };
+
+    MmsAccessResult {
+        success: true,
+        data_type: type_name,
+        value,
+    }
 }
 
 /// Parse GetVariableAccessAttributes request.
@@ -728,7 +825,7 @@ fn parse_read_response(content: &[u8], depth: usize) -> MmsReadResponse {
     if let Ok((tag_byte, _, _, inner, _)) = parse_ber_tlv(content) {
         if tag_byte == 0xA0 {
             let mut pos = inner;
-            while !pos.is_empty() && results.len() < 64 {
+            while !pos.is_empty() && results.len() < MAX_VARIABLE_SPECS {
                 if let Ok((item_tag, _, item_tag_num, item_inner, item_rem)) = parse_ber_tlv(pos) {
                     if item_tag == 0x80 {
                         // failure: DataAccessError INTEGER
@@ -741,77 +838,8 @@ fn parse_read_response(content: &[u8], depth: usize) -> MmsReadResponse {
                             value: Some(val),
                         });
                     } else {
-                        // success Data — tag byte 到类型名的映射参照 ISO 9506-2 Data CHOICE:
-                        //   [1] 0xA1 array, [2] 0xA2 structure (constructed)
-                        //   [3] 0x83 boolean, [4] 0x84 bit-string, [5] 0x85 integer
-                        //   [6] 0x86 unsigned, [7] 0x87 floating-point
-                        //   [9] 0x89 octet-string, [10] 0x8A visible-string
-                        //   [12] 0x8C binary-time, [16] 0x90 mms-string, [17] 0x91 utc-time
-                        let type_name = data_tag_name(item_tag_num)
-                            .map(|s| s.to_string());
-
-                        // array [1] constructed 0xA1, structure [2] constructed 0xA2
-                        let value = if item_tag == 0xA1 || item_tag == 0xA2 {
-                            // 计算成员数
-                            let mut count = 0u32;
-                            let mut cpos = item_inner;
-                            while !cpos.is_empty() {
-                                if let Ok((_, _, _, _, crem)) = parse_ber_tlv(cpos) {
-                                    count += 1;
-                                    cpos = crem;
-                                } else {
-                                    break;
-                                }
-                            }
-                            Some(format!("{} items", count))
-                        } else if item_tag == 0x83 {
-                            // [3] boolean
-                            if !item_inner.is_empty() {
-                                Some(if item_inner[0] != 0 { "true" } else { "false" }.to_string())
-                            } else {
-                                None
-                            }
-                        } else if item_tag == 0x85 {
-                            // [5] integer (signed)
-                            parse_ber_signed_integer(item_inner)
-                                .map(|v| v.to_string())
-                                .ok()
-                        } else if item_tag == 0x86 {
-                            // [6] unsigned
-                            parse_ber_integer(item_inner)
-                                .map(|v| v.to_string())
-                                .ok()
-                        } else if item_tag == 0x87 {
-                            // [7] floating-point: first byte = exponent width, rest = IEEE float
-                            if item_inner.len() == 5 {
-                                // single precision (1 exp + 4 IEEE)
-                                let bytes = [item_inner[1], item_inner[2], item_inner[3], item_inner[4]];
-                                Some(format!("{}", f32::from_be_bytes(bytes)))
-                            } else if item_inner.len() == 9 {
-                                // double precision (1 exp + 8 IEEE)
-                                let mut bytes = [0u8; 8];
-                                bytes.copy_from_slice(&item_inner[1..9]);
-                                Some(format!("{}", f64::from_be_bytes(bytes)))
-                            } else {
-                                None
-                            }
-                        } else if item_tag == 0x89 || item_tag == 0x8A || item_tag == 0x90 {
-                            // [9] octet-string, [10] visible-string, [16] mms-string
-                            Some(parse_ber_string(item_inner))
-                        } else {
-                            // 其他类型：hex 表示
-                            if !item_inner.is_empty() {
-                                Some(item_inner.iter().map(|b| format!("{:02x}", b)).collect())
-                            } else {
-                                None
-                            }
-                        };
-
-                        results.push(MmsAccessResult {
-                            success: true,
-                            data_type: type_name,
-                            value,
-                        });
+                        // success Data
+                        results.push(parse_data_element(item_tag, item_tag_num, item_inner));
                     }
                     pos = item_rem;
                 } else {
@@ -2180,5 +2208,340 @@ mod tests {
         assert!(r.success);
         assert_eq!(r.data_type.as_deref(), Some("array"));
         assert_eq!(r.value.as_deref(), Some("0 items"));
+    }
+
+    // ====== Write Request 解析测试 ======
+
+    #[test]
+    fn test_parse_write_request_domain_specific() {
+        // ConfirmedRequest: Write with domain-specific variable LLN0/Mod
+        // WriteRequest ::= SEQUENCE {
+        //   variableAccessSpecification VariableAccessSpecification,
+        //   listOfData [0] IMPLICIT SEQUENCE OF Data
+        // }
+        let data = &[
+            0xA0, 0x1D, // [0] ConfirmedRequest, length=29
+            0x02, 0x01, 0x01, // INTEGER invokeID = 1
+            0xA5, 0x18, // [5] Write, length=24
+            // variableAccessSpecification: listOfVariable [0]
+            0xA0, 0x11, // [0] listOfVariable, length=17
+            0x30, 0x0F, // SEQUENCE, length=15
+            0xA0, 0x0D, // [0] name (VariableSpecification)
+            0xA1, 0x0B, // [1] domain-specific
+            0x1A, 0x04, 0x4C, 0x4C, 0x4E, 0x30, // VisibleString "LLN0"
+            0x1A, 0x03, 0x4D, 0x6F, 0x64,       // VisibleString "Mod"
+            // listOfData [0] IMPLICIT SEQUENCE OF Data
+            0xA0, 0x03, // [0] listOfData, length=3
+            0x83, 0x01, 0x01, // boolean true
+        ];
+        let result = parse_mms_pdu(data);
+        assert!(result.is_ok(), "parse_mms_pdu failed: {:?}", result);
+        let pdu = result.unwrap();
+        match &pdu {
+            MmsPdu::ConfirmedRequest {
+                invoke_id,
+                service,
+                write_info,
+                ..
+            } => {
+                assert_eq!(*invoke_id, 1);
+                assert_eq!(*service, MmsConfirmedService::Write);
+                assert!(write_info.is_some(), "write_info should be Some");
+                let wi = write_info.as_ref().unwrap();
+                assert_eq!(wi.variable_specs.len(), 1);
+                assert_eq!(
+                    wi.variable_specs[0],
+                    ObjectNameRef::DomainSpecific {
+                        domain_id: "LLN0".to_string(),
+                        item_id: "Mod".to_string(),
+                    }
+                );
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    #[test]
+    fn test_parse_write_request_vmd_specific() {
+        // Write with vmd-specific variable "Var1"
+        let data = &[
+            0xA0, 0x16, // [0] ConfirmedRequest, length=22
+            0x02, 0x01, 0x01, // INTEGER invokeID = 1
+            0xA5, 0x11, // [5] Write, length=17
+            // variableAccessSpecification: listOfVariable [0]
+            0xA0, 0x0A, // [0] listOfVariable, length=10
+            0x30, 0x08, // SEQUENCE, length=8
+            0xA0, 0x06, // [0] name (VariableSpecification)
+            0x80, 0x04, 0x56, 0x61, 0x72, 0x31, // [0] vmd-specific "Var1"
+            // listOfData [0] IMPLICIT SEQUENCE OF Data
+            0xA0, 0x03, // [0] listOfData, length=3
+            0x83, 0x01, 0x01, // boolean true
+        ];
+        let result = parse_mms_pdu(data);
+        assert!(result.is_ok(), "parse_mms_pdu failed: {:?}", result);
+        let pdu = result.unwrap();
+        match &pdu {
+            MmsPdu::ConfirmedRequest {
+                invoke_id,
+                service,
+                write_info,
+                ..
+            } => {
+                assert_eq!(*invoke_id, 1);
+                assert_eq!(*service, MmsConfirmedService::Write);
+                assert!(write_info.is_some(), "write_info should be Some");
+                let wi = write_info.as_ref().unwrap();
+                assert_eq!(wi.variable_specs.len(), 1);
+                assert_eq!(
+                    wi.variable_specs[0],
+                    ObjectNameRef::VmdSpecific("Var1".to_string())
+                );
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    #[test]
+    fn test_parse_write_request_truncate_at_64() {
+        // 构造含 70 个 vmd_specific 变量的 Write 请求，验证截断到 64 条
+        // 每个变量 "V" = 1 字节：
+        //   SEQUENCE: 30 05 A0 03 80 01 56 = 7 bytes per variable
+        let var_spec: [u8; 7] = [
+            0x30, 0x05, // SEQUENCE, length=5
+            0xA0, 0x03, // [0] name
+            0x80, 0x01, 0x56, // [0] vmd-specific "V"
+        ];
+        let var_count = 70usize;
+
+        // listOfVariable [0] inner = var_count * 7 bytes
+        let list_inner_len = var_count * 7;
+        let mut list_of_var = vec![0xA0]; // [0] listOfVariable tag
+        // BER 长度编码（长形式 2 字节）
+        list_of_var.push(0x82);
+        list_of_var.push(((list_inner_len >> 8) & 0xFF) as u8);
+        list_of_var.push((list_inner_len & 0xFF) as u8);
+        for _ in 0..var_count {
+            list_of_var.extend_from_slice(&var_spec);
+        }
+
+        // listOfData [0] 最简：一个 boolean
+        let list_of_data: [u8; 5] = [0xA0, 0x03, 0x83, 0x01, 0x01];
+
+        // Write service content = listOfVariable + listOfData
+        let mut write_content = Vec::new();
+        write_content.extend_from_slice(&list_of_var);
+        write_content.extend_from_slice(&list_of_data);
+
+        // [5] Write tag
+        let mut write_tlv = vec![0xA5];
+        let wlen = write_content.len();
+        write_tlv.push(0x82);
+        write_tlv.push(((wlen >> 8) & 0xFF) as u8);
+        write_tlv.push((wlen & 0xFF) as u8);
+        write_tlv.extend_from_slice(&write_content);
+
+        // invokeID
+        let invoke_id: [u8; 3] = [0x02, 0x01, 0x01];
+
+        // ConfirmedRequest [0]
+        let inner_len = invoke_id.len() + write_tlv.len();
+        let mut data = vec![0xA0];
+        data.push(0x82);
+        data.push(((inner_len >> 8) & 0xFF) as u8);
+        data.push((inner_len & 0xFF) as u8);
+        data.extend_from_slice(&invoke_id);
+        data.extend_from_slice(&write_tlv);
+
+        let result = parse_mms_pdu(&data);
+        assert!(result.is_ok());
+        let pdu = result.unwrap();
+        match &pdu {
+            MmsPdu::ConfirmedRequest { write_info, .. } => {
+                let wi = write_info.as_ref().expect("write_info should be Some");
+                assert_eq!(wi.variable_specs.len(), 64,
+                    "Should truncate to 64, got {}", wi.variable_specs.len());
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    #[test]
+    fn test_parse_write_request_malformed_no_panic() {
+        // 各种畸形 Write 请求数据，都不应该 panic
+        let cases: Vec<&[u8]> = vec![
+            // 空的 Write service content
+            &[0xA0, 0x05, 0x02, 0x01, 0x01, 0xA5, 0x00],
+            // Write 内容被截断
+            &[0xA0, 0x06, 0x02, 0x01, 0x01, 0xA5, 0x01, 0xA0],
+            // listOfVariable 长度声明大于实际数据
+            &[0xA0, 0x08, 0x02, 0x01, 0x01, 0xA5, 0x03, 0xA0, 0xFF, 0x00],
+            // listOfVariable 内容为垃圾
+            &[0xA0, 0x0A, 0x02, 0x01, 0x01, 0xA5, 0x05, 0xA0, 0x03, 0xFF, 0xFF, 0xFF],
+            // 仅 invokeID 无服务数据
+            &[0xA0, 0x03, 0x02, 0x01, 0x01],
+        ];
+        for (i, data) in cases.iter().enumerate() {
+            // 不 panic 就算通过，结果可以是 Ok 或 Err
+            let _ = parse_mms_pdu(data);
+            // 如果解析成功且是 Write，write_info 可以是 None（没解析出变量）
+            if let Ok(MmsPdu::ConfirmedRequest { write_info, .. }) = parse_mms_pdu(data) {
+                if let Some(wi) = write_info {
+                    // 即使解析出了什么，变量列表也不应该包含垃圾
+                    assert!(wi.variable_specs.len() <= 64,
+                        "Case {}: too many specs", i);
+                }
+            }
+        }
+    }
+
+    // ====== Write Request listOfData ��析测试 ======
+
+    #[test]
+    fn test_parse_write_request_with_boolean_data() {
+        // Write with vmd-specific variable "V" + listOfData containing boolean true
+        let data = &[
+            0xA0, 0x13, // [0] ConfirmedRequest, length=19
+            0x02, 0x01, 0x01, // INTEGER invokeID = 1
+            0xA5, 0x0E, // [5] Write, length=14
+            // variableAccessSpecification: listOfVariable [0]
+            0xA0, 0x07, // [0] listOfVariable, length=7
+            0x30, 0x05, // SEQUENCE, length=5
+            0xA0, 0x03, // [0] name
+            0x80, 0x01, 0x56, // [0] vmd-specific "V"
+            // listOfData [0] IMPLICIT SEQUENCE OF Data
+            0xA0, 0x03, // [0] listOfData, length=3
+            0x83, 0x01, 0x01, // [3] boolean true
+        ];
+        let result = parse_mms_pdu(data);
+        assert!(result.is_ok(), "parse_mms_pdu failed: {:?}", result);
+        let pdu = result.unwrap();
+        match &pdu {
+            MmsPdu::ConfirmedRequest { write_info, .. } => {
+                let wi = write_info.as_ref().expect("write_info should be Some");
+                assert_eq!(wi.variable_specs.len(), 1);
+                assert_eq!(wi.data.len(), 1, "should have 1 data item");
+                let d = &wi.data[0];
+                assert!(d.success);
+                assert_eq!(d.data_type.as_deref(), Some("boolean"));
+                assert_eq!(d.value.as_deref(), Some("true"));
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    #[test]
+    fn test_parse_write_request_with_structure_data() {
+        // Write with vmd-specific variable "V" + listOfData containing structure with 3 members
+        // structure [2] = tag 0xA2 (constructed)
+        // 3 members: boolean true, integer 5, unsigned 10
+        let data = &[
+            0xA0, 0x22, // [0] ConfirmedRequest, length=34
+            0x02, 0x01, 0x01, // INTEGER invokeID = 1
+            0xA5, 0x1D, // [5] Write, length=29
+            // variableAccessSpecification: listOfVariable [0]
+            0xA0, 0x07, // [0] listOfVariable, length=7
+            0x30, 0x05, // SEQUENCE
+            0xA0, 0x03, // [0] name
+            0x80, 0x01, 0x56, // vmd-specific "V"
+            // listOfData [0]
+            0xA0, 0x12, // [0] listOfData, length=18
+            // structure [2] with 3 members
+            0xA2, 0x10, // [2] structure, length=16
+            0x83, 0x01, 0x01, // boolean true (3 bytes)
+            0x85, 0x01, 0x05, // integer 5 (3 bytes)
+            0x86, 0x01, 0x0A, // unsigned 10 (3 bytes)
+            // padding to make structure content valid - wait, 3*3=9, structure length should be 9
+        ];
+        // Recalculate: structure inner = 9 bytes, so tag A2 09
+        // listOfData inner = A2 09 ... = 11 bytes, so tag A0 0B
+        // Write inner = A0 07 ... + A0 0B ... = 7+2 + 11+2 = 22 bytes? No.
+        // listOfVariable = A0 07 (2 + 7 inner = 9 bytes total)
+        // listOfData = A0 0B (2 + 11 inner? no)
+        // Let me be more careful:
+        // structure content: 83 01 01  85 01 05  86 01 0A = 9 bytes
+        // structure TLV: A2 09 <9 bytes> = 11 bytes
+        // listOfData content: 11 bytes
+        // listOfData TLV: A0 0B <11 bytes> = 13 bytes
+        // listOfVariable TLV: A0 07 <7 bytes inner> = 9 bytes
+        // Write content: 9 + 13 = 22 bytes
+        // Write TLV: A5 16 <22 bytes> = 24 bytes
+        // invokeID: 02 01 01 = 3 bytes
+        // ConfirmedRequest content: 3 + 24 = 27 bytes
+        // ConfirmedRequest TLV: A0 1B <27 bytes>
+        let data = &[
+            0xA0, 0x1B, // [0] ConfirmedRequest, length=27
+            0x02, 0x01, 0x01, // invokeID = 1
+            0xA5, 0x16, // [5] Write, length=22
+            // listOfVariable [0]
+            0xA0, 0x07,
+            0x30, 0x05, 0xA0, 0x03, 0x80, 0x01, 0x56,
+            // listOfData [0]
+            0xA0, 0x0B,
+            // structure [2] with 3 members
+            0xA2, 0x09,
+            0x83, 0x01, 0x01, // boolean true
+            0x85, 0x01, 0x05, // integer 5
+            0x86, 0x01, 0x0A, // unsigned 10
+        ];
+        let result = parse_mms_pdu(data);
+        assert!(result.is_ok(), "parse_mms_pdu failed: {:?}", result);
+        match &result.unwrap() {
+            MmsPdu::ConfirmedRequest { write_info, .. } => {
+                let wi = write_info.as_ref().expect("write_info should be Some");
+                assert_eq!(wi.data.len(), 1);
+                let d = &wi.data[0];
+                assert!(d.success);
+                assert_eq!(d.data_type.as_deref(), Some("structure"));
+                assert_eq!(d.value.as_deref(), Some("3 items"));
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    #[test]
+    fn test_parse_write_request_with_integer_unsigned_data() {
+        // Write with vmd-specific variable "V" + listOfData containing integer(-3) and unsigned(42)
+        // integer [5] = tag 0x85, unsigned [6] = tag 0x86
+        // integer -3: 0x85 0x01 0xFD
+        // unsigned 42: 0x86 0x01 0x2A
+        // listOfData inner: 3 + 3 = 6 bytes
+        // listOfData TLV: A0 06 = 8 bytes
+        // listOfVariable TLV: A0 07 = 9 bytes
+        // Write content: 9 + 8 = 17 bytes → A5 11
+        // invokeID: 3 bytes
+        // ConfirmedRequest content: 3 + 19 = 22 → A0 16? No.
+        // Write TLV = A5 11 = 2 + 17 = 19 bytes total
+        // ConfirmedRequest content = 3 + 19 = 22 → A0 16
+        let data = &[
+            0xA0, 0x16, // [0] ConfirmedRequest, length=22
+            0x02, 0x01, 0x01, // invokeID = 1
+            0xA5, 0x11, // [5] Write, length=17
+            // listOfVariable [0]
+            0xA0, 0x07,
+            0x30, 0x05, 0xA0, 0x03, 0x80, 0x01, 0x56,
+            // listOfData [0]
+            0xA0, 0x06,
+            0x85, 0x01, 0xFD, // integer -3
+            0x86, 0x01, 0x2A, // unsigned 42
+        ];
+        let result = parse_mms_pdu(data);
+        assert!(result.is_ok(), "parse_mms_pdu failed: {:?}", result);
+        match &result.unwrap() {
+            MmsPdu::ConfirmedRequest { write_info, .. } => {
+                let wi = write_info.as_ref().expect("write_info should be Some");
+                assert_eq!(wi.data.len(), 2, "should have 2 data items");
+                // integer -3
+                let d0 = &wi.data[0];
+                assert!(d0.success);
+                assert_eq!(d0.data_type.as_deref(), Some("integer"));
+                assert_eq!(d0.value.as_deref(), Some("-3"));
+                // unsigned 42
+                let d1 = &wi.data[1];
+                assert!(d1.success);
+                assert_eq!(d1.data_type.as_deref(), Some("unsigned"));
+                assert_eq!(d1.value.as_deref(), Some("42"));
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
     }
 }
