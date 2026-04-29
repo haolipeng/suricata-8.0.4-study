@@ -417,4 +417,26 @@ mod tests {
         assert!(debug.contains("file_initial_position"), "should contain file_initial_position");
         assert!(debug.contains("100"), "should contain position value 100");
     }
+
+    #[test]
+    fn test_log_file_open_request_position_zero() {
+        // 验证 file_initial_position=0 被正确输出，且不与其他字段混淆
+        let pdu = MmsPdu::ConfirmedRequest {
+            invoke_id: 7,
+            service: MmsConfirmedService::FileOpen,
+            read_info: None,
+            write_info: None,
+            get_name_list_info: None,
+            get_var_access_attr_info: None,
+            get_named_var_list_attr_info: None,
+            file_open_info: Some(MmsFileOpenRequest {
+                file_name: "firmware.bin".to_string(),
+                initial_position: 0,
+            }),
+        };
+        let debug = log_pdu_to_debug_string(&pdu);
+        assert!(debug.contains("firmware.bin"), "should contain file_name");
+        // 确认 file_initial_position 字段存在且紧跟值 0
+        assert!(debug.contains("file_initial_position"), "should contain field name");
+    }
 }

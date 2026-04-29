@@ -2813,6 +2813,56 @@ mod tests {
     }
 
     #[test]
+    fn test_file_open_request_no_initial_position() {
+        // FileOpen 只有 fileName，缺�� initialPosition → 应默认为 0
+        // FileOpen content (8 bytes): A0 06 1A 04 "test"
+        // FileOpen TLV: BF 49 08 = 2+1+8 = 11 bytes
+        // invokeID: 02 01 01 = 3 bytes
+        // Total = 3 + 11 = 14 = 0x0E
+        let data = &[
+            0xA0, 0x0E, // [0] ConfirmedRequest, len=14
+            0x02, 0x01, 0x01, // invokeID = 1
+            0xBF, 0x49, 0x08, // [73] FileOpen, len=8
+            0xA0, 0x06, // [0] fileName SEQUENCE OF, len=6
+            0x1A, 0x04, 0x74, 0x65, 0x73, 0x74, // VisibleString "test"
+        ];
+        let pdu = parse_mms_pdu(data).expect("should parse");
+        match &pdu {
+            MmsPdu::ConfirmedRequest { file_open_info, .. } => {
+                let fo = file_open_info.as_ref().expect("should have file_open_info");
+                assert_eq!(fo.file_name, "test");
+                assert_eq!(fo.initial_position, 0, "missing initialPosition should default to 0");
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    #[test]
+    fn test_file_open_request_empty_filename_segments() {
+        // fileName [0] 内没有任何 GraphicString → file_name 为空字符串
+        // FileOpen content (5 bytes): A0 00 + 81 01 00
+        // FileOpen TLV: BF 49 05 = 2+1+5 = 8 bytes
+        // invokeID: 02 01 01 = 3 bytes
+        // Total = 3 + 8 = 11 = 0x0B
+        let data = &[
+            0xA0, 0x0B, // [0] ConfirmedRequest, len=11
+            0x02, 0x01, 0x01, // invokeID = 1
+            0xBF, 0x49, 0x05, // [73] FileOpen, len=5
+            0xA0, 0x00, // [0] fileName SEQUENCE OF, empty
+            0x81, 0x01, 0x00, // [1] initialPosition = 0
+        ];
+        let pdu = parse_mms_pdu(data).expect("should parse");
+        match &pdu {
+            MmsPdu::ConfirmedRequest { file_open_info, .. } => {
+                // 空 fileName 应该仍产生结果，file_name 为空字符串
+                let fo = file_open_info.as_ref().expect("should have file_open_info");
+                assert!(fo.file_name.is_empty(), "empty segments should produce empty file_name");
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    #[test]
     fn test_file_open_request_malformed_no_panic() {
         let cases: Vec<&[u8]> = vec![
             // 空的 FileOpen 内容
