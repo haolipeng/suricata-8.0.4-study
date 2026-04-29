@@ -239,6 +239,24 @@ pub struct MmsWriteRequest {
     pub data: Vec<MmsAccessResult>,         // Write 请求中的数据值列表（浅层解析）
 }
 
+/// Write-Response 中单个变量的写入结果。
+///
+/// Write-Response ::= SEQUENCE OF CHOICE {
+///     failure [0] IMPLICIT DataAccessError,
+///     success [1] IMPLICIT NULL
+/// }
+#[derive(Debug, Clone, PartialEq)]
+pub struct MmsWriteResult {
+    pub success: bool,
+    pub error: Option<String>,  // 失败时包含 DataAccessError 名称
+}
+
+/// Write-Response 解析结果。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MmsWriteResponse {
+    pub results: Vec<MmsWriteResult>,  // 上限 64 条
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MmsGetVarAccessAttrRequest {
     pub object_name: Option<ObjectNameRef>, // name [0] ObjectName
@@ -347,6 +365,7 @@ pub enum MmsPdu {
         get_named_var_list_attr_info: Option<MmsGetNamedVarListAttrResponse>,
         read_info: Option<MmsReadResponse>,
         get_var_access_attr_info: Option<MmsGetVarAccessAttrResponse>,
+        write_info: Option<MmsWriteResponse>,
     },
     ConfirmedError {                          // [2] 确认错误
         invoke_id: u32,
@@ -570,7 +589,7 @@ mod tests {
             invoke_id: 1,
             service: MmsConfirmedService::Write,
             get_name_list_info: None, get_named_var_list_attr_info: None,
-            read_info: None, get_var_access_attr_info: None,
+            read_info: None, get_var_access_attr_info: None, write_info: None,
         };
         assert_eq!(pdu.service_str(), Some("write"));
 
@@ -601,7 +620,7 @@ mod tests {
             invoke_id: 7,
             service: MmsConfirmedService::Status,
             get_name_list_info: None, get_named_var_list_attr_info: None,
-            read_info: None, get_var_access_attr_info: None,
+            read_info: None, get_var_access_attr_info: None, write_info: None,
         };
         assert_eq!(pdu.invoke_id(), Some(7));
 

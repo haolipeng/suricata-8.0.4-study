@@ -135,6 +135,7 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
             get_named_var_list_attr_info,
             read_info,
             get_var_access_attr_info,
+            write_info,
             ..
         } => {
             if let Some(ref gnl) = get_name_list_info {
@@ -180,6 +181,20 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
                 js.set_bool("mms_deletable", gva.mms_deletable)?;
                 if let Some(ref td) = gva.type_description {
                     js.set_string("type_description", td)?;
+                }
+            }
+            if let Some(ref wi) = write_info {
+                if !wi.results.is_empty() {
+                    js.open_array("write_results")?;
+                    for r in &wi.results {
+                        js.start_object()?;
+                        js.set_bool("success", r.success)?;
+                        if let Some(ref e) = r.error {
+                            js.set_string("error", e)?;
+                        }
+                        js.close()?;
+                    }
+                    js.close()?;
                 }
             }
         }
@@ -325,5 +340,52 @@ mod tests {
         assert!(debug.contains("4 items"), "should contain value 4 items");
         assert!(debug.contains("integer"), "should contain data_type integer");
         assert!(debug.contains("42"), "should contain value 42");
+    }
+
+    #[test]
+    fn test_log_write_response_all_success() {
+        let pdu = MmsPdu::ConfirmedResponse {
+            invoke_id: 1,
+            service: MmsConfirmedService::Write,
+            get_name_list_info: None,
+            get_named_var_list_attr_info: None,
+            read_info: None,
+            get_var_access_attr_info: None,
+            write_info: Some(MmsWriteResponse {
+                results: vec![
+                    MmsWriteResult { success: true, error: None },
+                    MmsWriteResult { success: true, error: None },
+                ],
+            }),
+        };
+        let debug = log_pdu_to_debug_string(&pdu);
+        assert!(debug.contains("write_results"), "should contain write_results, got: {}", debug);
+        assert!(debug.contains("true"), "should contain success: true");
+        // 全部成功时不应包含 error 字段
+        assert!(!debug.contains("error"), "should not contain error field for all-success response, got: {}", debug);
+    }
+
+    #[test]
+    fn test_log_write_response_partial_failure() {
+        let pdu = MmsPdu::ConfirmedResponse {
+            invoke_id: 2,
+            service: MmsConfirmedService::Write,
+            get_name_list_info: None,
+            get_named_var_list_attr_info: None,
+            read_info: None,
+            get_var_access_attr_info: None,
+            write_info: Some(MmsWriteResponse {
+                results: vec![
+                    MmsWriteResult { success: true, error: None },
+                    MmsWriteResult {
+                        success: false,
+                        error: Some("object-access-denied".to_string()),
+                    },
+                ],
+            }),
+        };
+        let debug = log_pdu_to_debug_string(&pdu);
+        assert!(debug.contains("write_results"), "should contain write_results");
+        assert!(debug.contains("object-access-denied"), "should contain error name, got: {}", debug);
     }
 }

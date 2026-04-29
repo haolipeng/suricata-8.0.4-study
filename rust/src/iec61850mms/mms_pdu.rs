@@ -852,6 +852,76 @@ fn parse_read_response(content: &[u8], depth: usize) -> MmsReadResponse {
     MmsReadResponse { results }
 }
 
+/// 将 DataAccessError 整数值映射为名称字符串。
+///
+/// ISO 9506-2 DataAccessError ::= INTEGER {
+///   object-invalidated(0), hardware-fault(1), temporarily-unavailable(2),
+///   object-access-denied(3), object-undefined(4), invalid-address(5),
+///   type-unsupported(6), type-inconsistent(7), object-attribute-inconsistent(8),
+///   object-access-unsupported(9), object-non-existent(10), object-value-invalid(11)
+/// }
+fn data_access_error_name(val: u32) -> &'static str {
+    match val {
+        0 => "object-invalidated",
+        1 => "hardware-fault",
+        2 => "temporarily-unavailable",
+        3 => "object-access-denied",
+        4 => "object-undefined",
+        5 => "invalid-address",
+        6 => "type-unsupported",
+        7 => "type-inconsistent",
+        8 => "object-attribute-inconsistent",
+        9 => "object-access-unsupported",
+        10 => "object-non-existent",
+        11 => "object-value-invalid",
+        _ => "unknown",
+    }
+}
+
+/// 解析 Write-Response。
+///
+/// Write-Response ::= SEQUENCE OF CHOICE {
+///     failure [0] IMPLICIT DataAccessError (INTEGER),
+///     success [1] IMPLICIT NULL
+/// }
+fn parse_write_response(content: &[u8], depth: usize) -> MmsWriteResponse {
+    let mut results = Vec::new();
+    if depth > MAX_BER_DEPTH {
+        return MmsWriteResponse { results };
+    }
+
+    let mut pos = content;
+    while !pos.is_empty() && results.len() < MAX_VARIABLE_SPECS {
+        if let Ok((tag_byte, _, _, item_inner, item_rem)) = parse_ber_tlv(pos) {
+            match tag_byte {
+                0x80 => {
+                    // failure [0] IMPLICIT DataAccessError (INTEGER)
+                    let error_val = parse_ber_integer(item_inner).unwrap_or(0);
+                    results.push(MmsWriteResult {
+                        success: false,
+                        error: Some(data_access_error_name(error_val).to_string()),
+                    });
+                }
+                0x81 => {
+                    // success [1] IMPLICIT NULL
+                    results.push(MmsWriteResult {
+                        success: true,
+                        error: None,
+                    });
+                }
+                _ => {
+                    // 未知标签，跳过
+                }
+            }
+            pos = item_rem;
+        } else {
+            break;
+        }
+    }
+
+    MmsWriteResponse { results }
+}
+
 /// Parse a Confirmed-ResponsePDU.
 fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
     if depth > MAX_BER_DEPTH {
@@ -870,6 +940,7 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
             get_named_var_list_attr_info: None,
             read_info: None,
             get_var_access_attr_info: None,
+            write_info: None,
         });
     }
 
@@ -880,6 +951,7 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
     let mut get_named_var_list_attr_info = None;
     let mut read_info = None;
     let mut get_var_access_attr_info = None;
+    let mut write_info = None;
     if service == MmsConfirmedService::GetNameList {
         get_name_list_info = Some(parse_get_name_list_response(service_content, depth + 1));
     } else if service == MmsConfirmedService::GetNamedVariableListAttributes {
@@ -888,6 +960,8 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
         read_info = Some(parse_read_response(service_content, depth + 1));
     } else if service == MmsConfirmedService::GetVariableAccessAttributes {
         get_var_access_attr_info = Some(parse_get_var_access_attr_response(service_content, depth + 1));
+    } else if service == MmsConfirmedService::Write {
+        write_info = Some(parse_write_response(service_content, depth + 1));
     }
 
     Ok(MmsPdu::ConfirmedResponse {
@@ -897,6 +971,7 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
         get_named_var_list_attr_info,
         read_info,
         get_var_access_attr_info,
+        write_info,
     })
 }
 
@@ -2394,7 +2469,7 @@ mod tests {
         }
     }
 
-    // ====== Write Request listOfData ��析测试 ======
+    // ====== Write Request listOfData 解析测试 ======
 
     #[test]
     fn test_parse_write_request_with_boolean_data() {
@@ -2542,6 +2617,70 @@ mod tests {
                 assert_eq!(d1.value.as_deref(), Some("42"));
             }
             _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    // ====== Write Response 解析测试 ======
+
+    #[test]
+    fn test_write_response_all_success() {
+        // ConfirmedResponse with Write service: 2 个 success
+        // invokeID: 02 01 01 = 3 bytes
+        // Write [5]: A5 04 (inner=4: 81 00 + 81 00)
+        // Total inner = 3 + 6 = 9 → A1 09
+        let data = &[
+            0xA1, 0x09, // [1] len=9
+            0x02, 0x01, 0x01, // invokeID = 1
+            0xA5, 0x04, // [5] Write, len=4
+            0x81, 0x00, // success [1] NULL
+            0x81, 0x00, // success [1] NULL
+        ];
+        let pdu = parse_mms_pdu(data).expect("should parse");
+        match &pdu {
+            MmsPdu::ConfirmedResponse { invoke_id, service, write_info, .. } => {
+                assert_eq!(*invoke_id, 1);
+                assert_eq!(*service, MmsConfirmedService::Write);
+                let wi = write_info.as_ref().expect("write_info should be Some");
+                assert_eq!(wi.results.len(), 2);
+                assert!(wi.results[0].success);
+                assert!(wi.results[0].error.is_none());
+                assert!(wi.results[1].success);
+                assert!(wi.results[1].error.is_none());
+            }
+            _ => panic!("Expected ConfirmedResponse"),
+        }
+    }
+
+    #[test]
+    fn test_write_response_partial_failure() {
+        // Write response: success, failure(object-access-denied=3), success
+        // invokeID: 02 01 02 = 3 bytes
+        // Write [5]: A5 07 (inner=7: 81 00 + 80 01 03 + 81 00)
+        // Total inner = 3 + 9 = 12 → A1 0C
+        let data = &[
+            0xA1, 0x0C, // [1] len=12
+            0x02, 0x01, 0x02, // invokeID = 2
+            0xA5, 0x07, // [5] Write, len=7
+            0x81, 0x00, // success [1] NULL
+            0x80, 0x01, 0x03, // failure [0] DataAccessError = 3 (object-access-denied)
+            0x81, 0x00, // success [1] NULL
+        ];
+        let pdu = parse_mms_pdu(data).expect("should parse");
+        match &pdu {
+            MmsPdu::ConfirmedResponse { write_info, .. } => {
+                let wi = write_info.as_ref().expect("write_info should be Some");
+                assert_eq!(wi.results.len(), 3);
+                // 第 1 个：success
+                assert!(wi.results[0].success);
+                assert!(wi.results[0].error.is_none());
+                // 第 2 个：failure
+                assert!(!wi.results[1].success);
+                assert_eq!(wi.results[1].error.as_deref(), Some("object-access-denied"));
+                // 第 3 个：success
+                assert!(wi.results[2].success);
+                assert!(wi.results[2].error.is_none());
+            }
+            _ => panic!("Expected ConfirmedResponse"),
         }
     }
 }
