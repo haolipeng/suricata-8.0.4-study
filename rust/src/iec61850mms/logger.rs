@@ -63,6 +63,7 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
             get_name_list_info,
             get_var_access_attr_info,
             get_named_var_list_attr_info,
+            file_open_info,
             ..
         } => {
             if let Some(ref ri) = read_info {
@@ -128,6 +129,10 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
                     log_object_name_ref(name, js)?;
                     js.close()?;
                 }
+            }
+            if let Some(ref fo) = file_open_info {
+                js.set_string("file_name", &fo.file_name)?;
+                js.set_uint("file_initial_position", fo.initial_position as u64)?;
             }
         }
         MmsPdu::ConfirmedResponse {
@@ -289,6 +294,7 @@ mod tests {
             get_name_list_info: None,
             get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
+            file_open_info: None,
         };
         let debug = log_pdu_to_debug_string(&pdu);
         // Verify write_variables is present (not just "variables")
@@ -329,6 +335,7 @@ mod tests {
             get_name_list_info: None,
             get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
+            file_open_info: None,
         };
         let debug = log_pdu_to_debug_string(&pdu);
         // 两个变量
@@ -387,5 +394,27 @@ mod tests {
         let debug = log_pdu_to_debug_string(&pdu);
         assert!(debug.contains("write_results"), "should contain write_results");
         assert!(debug.contains("object-access-denied"), "should contain error name, got: {}", debug);
+    }
+
+    #[test]
+    fn test_log_file_open_request() {
+        let pdu = MmsPdu::ConfirmedRequest {
+            invoke_id: 5,
+            service: MmsConfirmedService::FileOpen,
+            read_info: None,
+            write_info: None,
+            get_name_list_info: None,
+            get_var_access_attr_info: None,
+            get_named_var_list_attr_info: None,
+            file_open_info: Some(MmsFileOpenRequest {
+                file_name: "subdir/config.dat".to_string(),
+                initial_position: 100,
+            }),
+        };
+        let debug = log_pdu_to_debug_string(&pdu);
+        assert!(debug.contains("file_name"), "should contain file_name, got: {}", debug);
+        assert!(debug.contains("subdir/config.dat"), "should contain path");
+        assert!(debug.contains("file_initial_position"), "should contain file_initial_position");
+        assert!(debug.contains("100"), "should contain position value 100");
     }
 }

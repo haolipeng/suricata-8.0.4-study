@@ -285,6 +285,18 @@ pub struct MmsGetNamedVarListAttrRequest {
     pub object_name: Option<ObjectNameRef>, // 查询的数据集名称
 }
 
+/// FileOpen-Request 解析结果。
+///
+/// FileOpen-Request ::= SEQUENCE {
+///     fileName         [0] IMPLICIT SEQUENCE OF GraphicString,
+///     initialPosition  [1] IMPLICIT Unsigned32
+/// }
+#[derive(Debug, Clone, PartialEq)]
+pub struct MmsFileOpenRequest {
+    pub file_name: String,          // 文件路径（多段路径用 "/" 拼接）
+    pub initial_position: u32,      // 初始读取位置（字节偏移）
+}
+
 /// GetNamedVariableListAttributes 响应数据。
 ///
 /// GetNamedVariableListAttributes-Response ::= SEQUENCE {
@@ -357,6 +369,7 @@ pub enum MmsPdu {
         get_name_list_info: Option<MmsGetNameListRequest>,
         get_var_access_attr_info: Option<MmsGetVarAccessAttrRequest>,
         get_named_var_list_attr_info: Option<MmsGetNamedVarListAttrRequest>,
+        file_open_info: Option<MmsFileOpenRequest>,
     },
     ConfirmedResponse {                       // [1] 确认响应
         invoke_id: u32,
@@ -581,6 +594,7 @@ mod tests {
             read_info: None, write_info: None,
             get_name_list_info: None, get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
+            file_open_info: None,
         };
         assert_eq!(pdu.service_str(), Some("read"));
 
@@ -612,6 +626,7 @@ mod tests {
             read_info: None, write_info: None,
             get_name_list_info: None, get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
+            file_open_info: None,
         };
         assert_eq!(pdu.invoke_id(), Some(42));
 
@@ -658,6 +673,7 @@ mod tests {
             get_name_list_info: None,
             get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
+            file_open_info: None,
         }
     }
 
@@ -705,6 +721,7 @@ mod tests {
             get_name_list_info: None,
             get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
+            file_open_info: None,
         };
         assert_eq!(pdu.first_write_variable(), None);
         assert_eq!(pdu.first_write_domain(), None);

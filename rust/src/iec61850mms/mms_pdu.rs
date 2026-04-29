@@ -397,6 +397,7 @@ fn parse_confirmed_request(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
     let mut get_name_list_info = None;
     let mut get_var_access_attr_info = None;
     let mut get_named_var_list_attr_info = None;
+    let mut file_open_info = None;
 
     match service {
         MmsConfirmedService::Read => {
@@ -422,6 +423,9 @@ fn parse_confirmed_request(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
         MmsConfirmedService::GetNamedVariableListAttributes => {
             get_named_var_list_attr_info = Some(parse_get_named_var_list_attr_request(service_content, depth + 1));
         }
+        MmsConfirmedService::FileOpen => {
+            file_open_info = parse_file_open_request(service_content, depth + 1);
+        }
         _ => {}
     }
 
@@ -433,6 +437,7 @@ fn parse_confirmed_request(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
         get_name_list_info,
         get_var_access_attr_info,
         get_named_var_list_attr_info,
+        file_open_info,
     })
 }
 
@@ -593,6 +598,62 @@ fn parse_get_named_var_list_attr_request(content: &[u8], depth: usize) -> MmsGet
     MmsGetNamedVarListAttrRequest {
         object_name: parse_object_name(content, depth + 1),
     }
+}
+
+/// 解析 FileOpen-Request。
+///
+/// FileOpen-Request ::= SEQUENCE {
+///     fileName         [0] IMPLICIT SEQUENCE OF GraphicString,
+///     initialPosition  [1] IMPLICIT Unsigned32
+/// }
+///
+/// fileName 是一个路径段列表，多段时用 "/" 拼接。
+fn parse_file_open_request(content: &[u8], depth: usize) -> Option<MmsFileOpenRequest> {
+    if depth > MAX_BER_DEPTH || content.is_empty() {
+        return None;
+    }
+
+    // 第一个 TLV: fileName [0] IMPLICIT SEQUENCE OF GraphicString
+    let (tag_byte, _, _, inner, rem) = parse_ber_tlv(content).ok()?;
+    if tag_byte != 0xA0 {
+        return None;
+    }
+
+    // 解析 SEQUENCE OF GraphicString — 逐个提取路径段
+    let mut segments = Vec::new();
+    let mut pos = inner;
+    while !pos.is_empty() && segments.len() < 16 {
+        if let Ok((_, _, _, seg_content, seg_rem)) = parse_ber_tlv(pos) {
+            let seg = parse_ber_string(seg_content);
+            if !seg.is_empty() {
+                segments.push(seg);
+            }
+            pos = seg_rem;
+        } else {
+            break;
+        }
+    }
+
+    let file_name = if segments.len() == 1 {
+        segments.into_iter().next().unwrap()
+    } else {
+        segments.join("/")
+    };
+
+    // 第二个 TLV: initialPosition [1] IMPLICIT Unsigned32
+    let mut initial_position = 0u32;
+    if !rem.is_empty() {
+        if let Ok((tag2, _, _, pos_content, _)) = parse_ber_tlv(rem) {
+            if tag2 == 0x81 {
+                initial_position = parse_ber_integer(pos_content).unwrap_or(0);
+            }
+        }
+    }
+
+    Some(MmsFileOpenRequest {
+        file_name,
+        initial_position,
+    })
 }
 
 /// 解析 GetNamedVariableListAttributes 响应.
@@ -2681,6 +2742,88 @@ mod tests {
                 assert!(wi.results[2].error.is_none());
             }
             _ => panic!("Expected ConfirmedResponse"),
+        }
+    }
+
+    // ====== FileOpen Request 解析测试 ======
+
+    #[test]
+    fn test_file_open_request_simple_path() {
+        // ConfirmedRequest: FileOpen with fileName="test", initialPosition=0
+        //
+        // FileOpen content (11 bytes):
+        //   fileName [0]: A0 06 (SEQUENCE OF) → 1A 04 "test" (VisibleString)
+        //   initialPosition [1]: 81 01 00
+        //
+        // FileOpen tag: BF 49 (multi-byte tag 73), len=0B(11)
+        //   BF 49 0B = 2+1+11 = 14 bytes
+        // invokeID: 02 01 05 = 3 bytes
+        // Total inner = 3 + 14 = 17 = 0x11
+        let data = &[
+            0xA0, 0x11, // [0] ConfirmedRequest, len=17
+            0x02, 0x01, 0x05, // invokeID = 5
+            0xBF, 0x49, 0x0B, // [73] FileOpen, len=11
+            0xA0, 0x06, // [0] fileName SEQUENCE OF, len=6
+            0x1A, 0x04, 0x74, 0x65, 0x73, 0x74, // VisibleString "test"
+            0x81, 0x01, 0x00, // [1] initialPosition = 0
+        ];
+        let pdu = parse_mms_pdu(data).expect("should parse FileOpen request");
+        match &pdu {
+            MmsPdu::ConfirmedRequest { invoke_id, service, file_open_info, .. } => {
+                assert_eq!(*invoke_id, 5);
+                assert_eq!(*service, MmsConfirmedService::FileOpen);
+                let fo = file_open_info.as_ref().expect("file_open_info should be Some");
+                assert_eq!(fo.file_name, "test");
+                assert_eq!(fo.initial_position, 0);
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    #[test]
+    fn test_file_open_request_with_subdirectory() {
+        // FileOpen with 2 path segments: "sub", "a.dat" → "sub/a.dat"
+        //
+        // fileName [0]: A0 0B → 1A 03 "sub" + 1A 04 "a.dat"(actually 5 bytes)
+        //   "sub" = 3 bytes → 1A 03 73 75 62 = 5 bytes
+        //   "a.dat" = 5 bytes → 1A 05 61 2E 64 61 74 = 7 bytes
+        //   inner = 5 + 7 = 12 → A0 0C
+        // initialPosition [1]: 81 01 64 = 3 bytes (value=100)
+        // FileOpen content = 14 + 3 = 17 → BF 49 11
+        // invokeID = 02 01 0A = 3 bytes
+        // Total = 3 + 2 + 1 + 17 = 23 = 0x17
+        let data = &[
+            0xA0, 0x17, // [0] ConfirmedRequest, len=23
+            0x02, 0x01, 0x0A, // invokeID = 10
+            0xBF, 0x49, 0x11, // [73] FileOpen, len=17
+            0xA0, 0x0C, // [0] fileName SEQUENCE OF, len=12
+            0x1A, 0x03, 0x73, 0x75, 0x62, // VisibleString "sub"
+            0x1A, 0x05, 0x61, 0x2E, 0x64, 0x61, 0x74, // VisibleString "a.dat"
+            0x81, 0x01, 0x64, // [1] initialPosition = 100
+        ];
+        let pdu = parse_mms_pdu(data).expect("should parse FileOpen with subdirectory");
+        match &pdu {
+            MmsPdu::ConfirmedRequest { file_open_info, .. } => {
+                let fo = file_open_info.as_ref().expect("file_open_info should be Some");
+                assert_eq!(fo.file_name, "sub/a.dat");
+                assert_eq!(fo.initial_position, 100);
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    #[test]
+    fn test_file_open_request_malformed_no_panic() {
+        let cases: Vec<&[u8]> = vec![
+            // 空的 FileOpen 内容
+            &[0xA0, 0x05, 0x02, 0x01, 0x01, 0xBF, 0x49, 0x00],
+            // FileOpen 内容被截断
+            &[0xA0, 0x06, 0x02, 0x01, 0x01, 0xBF, 0x49, 0x01, 0xA0],
+            // fileName 标签错误（不是 A0）
+            &[0xA0, 0x08, 0x02, 0x01, 0x01, 0xBF, 0x49, 0x03, 0x81, 0x01, 0x00],
+        ];
+        for case in cases {
+            let _ = parse_mms_pdu(case);
         }
     }
 }
