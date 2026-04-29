@@ -427,8 +427,8 @@ fn parse_confirmed_request(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
         MmsConfirmedService::FileOpen => {
             file_open_info = parse_file_open_request(service_content, depth + 1);
         }
-        MmsConfirmedService::FileRead => {
-            // FileRead-Request ::= Integer32 (just the frsmID)
+        MmsConfirmedService::FileRead | MmsConfirmedService::FileClose => {
+            // FileRead-Request / FileClose-Request ::= Integer32 (frsmID)
             if let Ok(frsm_id) = parse_ber_integer(service_content) {
                 file_read_info = Some(MmsFileReadRequest { frsm_id });
             }
@@ -3115,6 +3115,53 @@ mod tests {
                 let fr = file_read_info.as_ref().expect("should have file_read_info");
                 assert_eq!(fr.data_length, 5);
                 assert_eq!(fr.more_follows, false);
+            }
+            _ => panic!("Expected ConfirmedResponse"),
+        }
+    }
+
+    // ====== FileClose 请求/响应解析测试 ======
+
+    #[test]
+    fn test_file_close_request_frsm_id() {
+        // FileClose-Request ::= Integer32 (frsmID), tag=75
+        // BF 4B = multi-byte tag for 75
+        // invokeID: 02 01 02 = 3 bytes
+        // FileClose: BF 4B 01 05 = 4 bytes (frsmID=5)
+        // Total = 3 + 4 = 7 = 0x07
+        let data = &[
+            0xA0, 0x07, // [0] ConfirmedRequest, len=7
+            0x02, 0x01, 0x02, // invokeID = 2
+            0xBF, 0x4B, 0x01, 0x05, // [75] FileClose, len=1, content=5
+        ];
+        let pdu = parse_mms_pdu(data).expect("should parse FileClose request");
+        match &pdu {
+            MmsPdu::ConfirmedRequest { invoke_id, service, file_read_info, .. } => {
+                assert_eq!(*invoke_id, 2);
+                assert_eq!(*service, MmsConfirmedService::FileClose);
+                let fr = file_read_info.as_ref().expect("file_read_info should be Some");
+                assert_eq!(fr.frsm_id, 5);
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    #[test]
+    fn test_file_close_response_null() {
+        // FileClose-Response ::= NULL (tag=75, empty content)
+        // BF 4B 00 = tag(2) + len(1) + content(0) = 3 bytes
+        // invokeID: 02 01 02 = 3 bytes
+        // Total = 3 + 3 = 6 = 0x06
+        let data = &[
+            0xA1, 0x06, // [1] ConfirmedResponse, len=6
+            0x02, 0x01, 0x02, // invokeID = 2
+            0xBF, 0x4B, 0x00, // [75] FileClose, len=0 (NULL)
+        ];
+        let pdu = parse_mms_pdu(data).expect("should parse FileClose response");
+        match &pdu {
+            MmsPdu::ConfirmedResponse { invoke_id, service, .. } => {
+                assert_eq!(*invoke_id, 2);
+                assert_eq!(*service, MmsConfirmedService::FileClose);
             }
             _ => panic!("Expected ConfirmedResponse"),
         }
