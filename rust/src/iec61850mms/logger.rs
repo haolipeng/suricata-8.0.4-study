@@ -64,6 +64,7 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
             get_var_access_attr_info,
             get_named_var_list_attr_info,
             file_open_info,
+            file_read_info,
             ..
         } => {
             if let Some(ref ri) = read_info {
@@ -134,6 +135,9 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
                 js.set_string("file_name", &fo.file_name)?;
                 js.set_uint("file_initial_position", fo.initial_position as u64)?;
             }
+            if let Some(ref fr) = file_read_info {
+                js.set_uint("file_frsm_id", fr.frsm_id as u64)?;
+            }
         }
         MmsPdu::ConfirmedResponse {
             get_name_list_info,
@@ -142,6 +146,7 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
             get_var_access_attr_info,
             write_info,
             file_open_info,
+            file_read_info,
             ..
         } => {
             if let Some(ref gnl) = get_name_list_info {
@@ -211,6 +216,10 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
                 if let Some(ref lm) = fo.last_modified {
                     js.set_string("file_last_modified", lm)?;
                 }
+            }
+            if let Some(ref fr) = file_read_info {
+                js.set_uint("file_data_length", fr.data_length as u64)?;
+                js.set_bool("file_more_follows", fr.more_follows)?;
             }
         }
         MmsPdu::ConfirmedError { error_class, error_code, .. } => {
@@ -305,6 +314,7 @@ mod tests {
             get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
             file_open_info: None,
+            file_read_info: None,
         };
         let debug = log_pdu_to_debug_string(&pdu);
         // Verify write_variables is present (not just "variables")
@@ -346,6 +356,7 @@ mod tests {
             get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
             file_open_info: None,
+            file_read_info: None,
         };
         let debug = log_pdu_to_debug_string(&pdu);
         // 两个变量
@@ -375,6 +386,7 @@ mod tests {
                 ],
             }),
             file_open_info: None,
+            file_read_info: None,
         };
         let debug = log_pdu_to_debug_string(&pdu);
         assert!(debug.contains("write_results"), "should contain write_results, got: {}", debug);
@@ -402,6 +414,7 @@ mod tests {
                 ],
             }),
             file_open_info: None,
+            file_read_info: None,
         };
         let debug = log_pdu_to_debug_string(&pdu);
         assert!(debug.contains("write_results"), "should contain write_results");
@@ -422,6 +435,7 @@ mod tests {
                 file_name: "subdir/config.dat".to_string(),
                 initial_position: 100,
             }),
+            file_read_info: None,
         };
         let debug = log_pdu_to_debug_string(&pdu);
         assert!(debug.contains("file_name"), "should contain file_name, got: {}", debug);
@@ -445,6 +459,7 @@ mod tests {
                 file_name: "firmware.bin".to_string(),
                 initial_position: 0,
             }),
+            file_read_info: None,
         };
         let debug = log_pdu_to_debug_string(&pdu);
         assert!(debug.contains("firmware.bin"), "should contain file_name");
@@ -467,6 +482,7 @@ mod tests {
                 file_size: Some(4096),
                 last_modified: Some("20240101120000Z".to_string()),
             }),
+            file_read_info: None,
         };
         let debug = log_pdu_to_debug_string(&pdu);
         assert!(debug.contains("file_frsm_id"), "should contain file_frsm_id, got: {}", debug);
@@ -474,5 +490,38 @@ mod tests {
         assert!(debug.contains("4096"), "should contain size value");
         assert!(debug.contains("file_last_modified"), "should contain file_last_modified");
         assert!(debug.contains("20240101120000Z"), "should contain time value");
+    }
+
+    #[test]
+    fn test_log_file_read_request() {
+        let pdu = MmsPdu::ConfirmedRequest {
+            invoke_id: 1,
+            service: MmsConfirmedService::FileRead,
+            read_info: None, write_info: None,
+            get_name_list_info: None, get_var_access_attr_info: None,
+            get_named_var_list_attr_info: None, file_open_info: None,
+            file_read_info: Some(MmsFileReadRequest { frsm_id: 7 }),
+        };
+        let debug = log_pdu_to_debug_string(&pdu);
+        assert!(debug.contains("file_frsm_id"), "should contain file_frsm_id, got: {}", debug);
+    }
+
+    #[test]
+    fn test_log_file_read_response() {
+        let pdu = MmsPdu::ConfirmedResponse {
+            invoke_id: 1,
+            service: MmsConfirmedService::FileRead,
+            get_name_list_info: None, get_named_var_list_attr_info: None,
+            read_info: None, get_var_access_attr_info: None,
+            write_info: None, file_open_info: None,
+            file_read_info: Some(MmsFileReadResponse {
+                data_length: 1024,
+                more_follows: false,
+            }),
+        };
+        let debug = log_pdu_to_debug_string(&pdu);
+        assert!(debug.contains("file_data_length"), "should contain file_data_length, got: {}", debug);
+        assert!(debug.contains("1024"), "should contain data length value");
+        assert!(debug.contains("file_more_follows"), "should contain file_more_follows");
     }
 }

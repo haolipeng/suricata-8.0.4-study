@@ -314,6 +314,24 @@ pub struct MmsFileOpenResponse {
     pub last_modified: Option<String>,   // 最后修改时间（GeneralizedTime 字符串）
 }
 
+/// FileRead-Request 解析结果。
+/// FileRead-Request ::= Integer32 (frsmID)
+#[derive(Debug, Clone, PartialEq)]
+pub struct MmsFileReadRequest {
+    pub frsm_id: u32,
+}
+
+/// FileRead-Response 解析结果。
+/// FileRead-Response ::= SEQUENCE {
+///     fileData     [0] IMPLICIT OCTET STRING,
+///     moreFollows  [1] IMPLICIT BOOLEAN DEFAULT TRUE
+/// }
+#[derive(Debug, Clone, PartialEq)]
+pub struct MmsFileReadResponse {
+    pub data_length: u32,       // fileData 的字节长度（不保存实际内容）
+    pub more_follows: bool,     // 是否还有后续数据
+}
+
 /// GetNamedVariableListAttributes 响应数据。
 ///
 /// GetNamedVariableListAttributes-Response ::= SEQUENCE {
@@ -387,6 +405,7 @@ pub enum MmsPdu {
         get_var_access_attr_info: Option<MmsGetVarAccessAttrRequest>,
         get_named_var_list_attr_info: Option<MmsGetNamedVarListAttrRequest>,
         file_open_info: Option<MmsFileOpenRequest>,
+        file_read_info: Option<MmsFileReadRequest>,
     },
     ConfirmedResponse {                       // [1] 确认响应
         invoke_id: u32,
@@ -397,6 +416,7 @@ pub enum MmsPdu {
         get_var_access_attr_info: Option<MmsGetVarAccessAttrResponse>,
         write_info: Option<MmsWriteResponse>,
         file_open_info: Option<MmsFileOpenResponse>,
+        file_read_info: Option<MmsFileReadResponse>,
     },
     ConfirmedError {                          // [2] 确认错误
         invoke_id: u32,
@@ -623,6 +643,7 @@ mod tests {
             get_name_list_info: None, get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
             file_open_info: None,
+            file_read_info: None,
         };
         assert_eq!(pdu.service_str(), Some("read"));
 
@@ -633,6 +654,7 @@ mod tests {
             get_name_list_info: None, get_named_var_list_attr_info: None,
             read_info: None, get_var_access_attr_info: None, write_info: None,
             file_open_info: None,
+            file_read_info: None,
         };
         assert_eq!(pdu.service_str(), Some("write"));
 
@@ -656,6 +678,7 @@ mod tests {
             get_name_list_info: None, get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
             file_open_info: None,
+            file_read_info: None,
         };
         assert_eq!(pdu.invoke_id(), Some(42));
 
@@ -666,6 +689,7 @@ mod tests {
             get_name_list_info: None, get_named_var_list_attr_info: None,
             read_info: None, get_var_access_attr_info: None, write_info: None,
             file_open_info: None,
+            file_read_info: None,
         };
         assert_eq!(pdu.invoke_id(), Some(7));
 
@@ -704,6 +728,7 @@ mod tests {
             get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
             file_open_info: None,
+            file_read_info: None,
         }
     }
 
@@ -752,6 +777,7 @@ mod tests {
             get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
             file_open_info: None,
+            file_read_info: None,
         };
         assert_eq!(pdu.first_write_variable(), None);
         assert_eq!(pdu.first_write_domain(), None);
@@ -864,6 +890,7 @@ mod tests {
                 file_name: "firmware.bin".to_string(),
                 initial_position: 0,
             }),
+            file_read_info: None,
         };
         assert_eq!(pdu.file_name(), Some("firmware.bin"));
     }
@@ -879,6 +906,7 @@ mod tests {
             get_var_access_attr_info: None,
             get_named_var_list_attr_info: None,
             file_open_info: None,
+            file_read_info: None,
         };
         assert_eq!(pdu.file_name(), None);
     }

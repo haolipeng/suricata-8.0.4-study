@@ -398,6 +398,7 @@ fn parse_confirmed_request(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
     let mut get_var_access_attr_info = None;
     let mut get_named_var_list_attr_info = None;
     let mut file_open_info = None;
+    let mut file_read_info = None;
 
     match service {
         MmsConfirmedService::Read => {
@@ -426,6 +427,12 @@ fn parse_confirmed_request(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
         MmsConfirmedService::FileOpen => {
             file_open_info = parse_file_open_request(service_content, depth + 1);
         }
+        MmsConfirmedService::FileRead => {
+            // FileRead-Request ::= Integer32 (just the frsmID)
+            if let Ok(frsm_id) = parse_ber_integer(service_content) {
+                file_read_info = Some(MmsFileReadRequest { frsm_id });
+            }
+        }
         _ => {}
     }
 
@@ -438,6 +445,7 @@ fn parse_confirmed_request(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
         get_var_access_attr_info,
         get_named_var_list_attr_info,
         file_open_info,
+        file_read_info,
     })
 }
 
@@ -1042,6 +1050,40 @@ fn parse_file_open_response(content: &[u8], depth: usize) -> Option<MmsFileOpenR
     })
 }
 
+/// 解析 FileRead-Response。
+///
+/// FileRead-Response ::= SEQUENCE {
+///     fileData     [0] IMPLICIT OCTET STRING,
+///     moreFollows  [1] IMPLICIT BOOLEAN DEFAULT TRUE
+/// }
+fn parse_file_read_response(content: &[u8], depth: usize) -> Option<MmsFileReadResponse> {
+    if depth > MAX_BER_DEPTH || content.is_empty() {
+        return None;
+    }
+
+    // fileData [0] IMPLICIT OCTET STRING — 只取长度
+    let (tag_byte, _, _, inner, rem) = parse_ber_tlv(content).ok()?;
+    if tag_byte != 0x80 {
+        return None;
+    }
+    let data_length = inner.len() as u32;
+
+    // moreFollows [1] IMPLICIT BOOLEAN DEFAULT TRUE
+    let mut more_follows = true; // ASN.1 DEFAULT TRUE
+    if !rem.is_empty() {
+        if let Ok((tag2, _, _, bool_content, _)) = parse_ber_tlv(rem) {
+            if tag2 == 0x81 && !bool_content.is_empty() {
+                more_follows = bool_content[0] != 0;
+            }
+        }
+    }
+
+    Some(MmsFileReadResponse {
+        data_length,
+        more_follows,
+    })
+}
+
 /// Parse a Confirmed-ResponsePDU.
 fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
     if depth > MAX_BER_DEPTH {
@@ -1062,6 +1104,7 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
             get_var_access_attr_info: None,
             write_info: None,
             file_open_info: None,
+            file_read_info: None,
         });
     }
 
@@ -1074,6 +1117,7 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
     let mut get_var_access_attr_info = None;
     let mut write_info = None;
     let mut file_open_info = None;
+    let mut file_read_info = None;
     if service == MmsConfirmedService::GetNameList {
         get_name_list_info = Some(parse_get_name_list_response(service_content, depth + 1));
     } else if service == MmsConfirmedService::GetNamedVariableListAttributes {
@@ -1086,6 +1130,8 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
         write_info = Some(parse_write_response(service_content, depth + 1));
     } else if service == MmsConfirmedService::FileOpen {
         file_open_info = parse_file_open_response(service_content, depth + 1);
+    } else if service == MmsConfirmedService::FileRead {
+        file_read_info = parse_file_read_response(service_content, depth + 1);
     }
 
     Ok(MmsPdu::ConfirmedResponse {
@@ -1097,6 +1143,7 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
         get_var_access_attr_info,
         write_info,
         file_open_info,
+        file_read_info,
     })
 }
 
@@ -3006,6 +3053,68 @@ mod tests {
                 assert_eq!(fo.frsm_id, 1);
                 assert_eq!(fo.file_size, Some(256));
                 assert_eq!(fo.last_modified, None, "missing lastModified should be None");
+            }
+            _ => panic!("Expected ConfirmedResponse"),
+        }
+    }
+
+    // ====== FileRead 请求/响应解析测试 ======
+
+    #[test]
+    fn test_file_read_request_frsm_id() {
+        // FileRead-Request ::= Integer32 (just frsmID)
+        // tag=74: BF 4A (multi-byte tag for 74)
+        // content = just the integer value (frsmID=7)
+        //
+        // FileRead content: 直接是 integer 内容 → 07 (1 byte)
+        // BF 4A 01 07 = 4 bytes? No — BF 4A is tag, 01 is len, 07 is content = 4 bytes total
+        // Wait: parse_ber_tlv on BF 4A will return tag_num=74, and content=the inner bytes
+        // The service content passed to our parse function is the raw integer bytes
+        //
+        // invokeID: 02 01 03 = 3 bytes
+        // FileRead tag: BF 4A 01 = 2+1+1 = 4 bytes (content is single byte 0x07)
+        // Total = 3 + 4 = 7 = 0x07
+        let data = &[
+            0xA0, 0x07, // [0] ConfirmedRequest, len=7
+            0x02, 0x01, 0x03, // invokeID = 3
+            0xBF, 0x4A, 0x01, 0x07, // [74] FileRead, len=1, content=7
+        ];
+        let pdu = parse_mms_pdu(data).expect("should parse FileRead request");
+        match &pdu {
+            MmsPdu::ConfirmedRequest { invoke_id, service, file_read_info, .. } => {
+                assert_eq!(*invoke_id, 3);
+                assert_eq!(*service, MmsConfirmedService::FileRead);
+                let fr = file_read_info.as_ref().expect("file_read_info should be Some");
+                assert_eq!(fr.frsm_id, 7);
+            }
+            _ => panic!("Expected ConfirmedRequest"),
+        }
+    }
+
+    #[test]
+    fn test_file_read_response_data_length_and_more_follows() {
+        // FileRead-Response: fileData=5 bytes, moreFollows=false
+        // fileData [0]: 80 05 + 5 bytes dummy = 7 bytes
+        // moreFollows [1]: 81 01 00 (false) = 3 bytes
+        // FileRead content = 7 + 3 = 10
+        // BF 4A 0A = 2+1+10 = 13 bytes
+        // invokeID: 02 01 01 = 3 bytes
+        // Total = 3 + 13 = 16 = 0x10
+        let data: Vec<u8> = [
+            &[0xA1, 0x10][..],            // [1] ConfirmedResponse, len=16
+            &[0x02, 0x01, 0x01],          // invokeID = 1
+            &[0xBF, 0x4A, 0x0A],          // [74] FileRead, len=10
+            &[0x80, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05], // fileData [0], 5 bytes
+            &[0x81, 0x01, 0x00],          // moreFollows [1] = false
+        ].concat();
+
+        let pdu = parse_mms_pdu(&data).expect("should parse FileRead response");
+        match &pdu {
+            MmsPdu::ConfirmedResponse { service, file_read_info, .. } => {
+                assert_eq!(*service, MmsConfirmedService::FileRead);
+                let fr = file_read_info.as_ref().expect("should have file_read_info");
+                assert_eq!(fr.data_length, 5);
+                assert_eq!(fr.more_follows, false);
             }
             _ => panic!("Expected ConfirmedResponse"),
         }
