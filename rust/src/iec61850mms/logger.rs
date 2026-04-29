@@ -141,6 +141,7 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
             read_info,
             get_var_access_attr_info,
             write_info,
+            file_open_info,
             ..
         } => {
             if let Some(ref gnl) = get_name_list_info {
@@ -200,6 +201,15 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
                         js.close()?;
                     }
                     js.close()?;
+                }
+            }
+            if let Some(ref fo) = file_open_info {
+                js.set_uint("file_frsm_id", fo.frsm_id as u64)?;
+                if let Some(size) = fo.file_size {
+                    js.set_uint("file_size", size as u64)?;
+                }
+                if let Some(ref lm) = fo.last_modified {
+                    js.set_string("file_last_modified", lm)?;
                 }
             }
         }
@@ -364,6 +374,7 @@ mod tests {
                     MmsWriteResult { success: true, error: None },
                 ],
             }),
+            file_open_info: None,
         };
         let debug = log_pdu_to_debug_string(&pdu);
         assert!(debug.contains("write_results"), "should contain write_results, got: {}", debug);
@@ -390,6 +401,7 @@ mod tests {
                     },
                 ],
             }),
+            file_open_info: None,
         };
         let debug = log_pdu_to_debug_string(&pdu);
         assert!(debug.contains("write_results"), "should contain write_results");
@@ -438,5 +450,29 @@ mod tests {
         assert!(debug.contains("firmware.bin"), "should contain file_name");
         // 确认 file_initial_position 字段存在且紧跟值 0
         assert!(debug.contains("file_initial_position"), "should contain field name");
+    }
+
+    #[test]
+    fn test_log_file_open_response() {
+        let pdu = MmsPdu::ConfirmedResponse {
+            invoke_id: 3,
+            service: MmsConfirmedService::FileOpen,
+            get_name_list_info: None,
+            get_named_var_list_attr_info: None,
+            read_info: None,
+            get_var_access_attr_info: None,
+            write_info: None,
+            file_open_info: Some(MmsFileOpenResponse {
+                frsm_id: 7,
+                file_size: Some(4096),
+                last_modified: Some("20240101120000Z".to_string()),
+            }),
+        };
+        let debug = log_pdu_to_debug_string(&pdu);
+        assert!(debug.contains("file_frsm_id"), "should contain file_frsm_id, got: {}", debug);
+        assert!(debug.contains("file_size"), "should contain file_size");
+        assert!(debug.contains("4096"), "should contain size value");
+        assert!(debug.contains("file_last_modified"), "should contain file_last_modified");
+        assert!(debug.contains("20240101120000Z"), "should contain time value");
     }
 }

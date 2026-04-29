@@ -983,6 +983,65 @@ fn parse_write_response(content: &[u8], depth: usize) -> MmsWriteResponse {
     MmsWriteResponse { results }
 }
 
+/// 解析 FileOpen-Response。
+///
+/// FileOpen-Response ::= SEQUENCE {
+///     frsmID         [0] IMPLICIT Integer32,
+///     fileAttributes [1] IMPLICIT FileAttributes
+/// }
+/// FileAttributes ::= SEQUENCE {
+///     sizeOfFile    [0] IMPLICIT Unsigned32,
+///     lastModified  [1] IMPLICIT GeneralizedTime OPTIONAL
+/// }
+fn parse_file_open_response(content: &[u8], depth: usize) -> Option<MmsFileOpenResponse> {
+    if depth > MAX_BER_DEPTH || content.is_empty() {
+        return None;
+    }
+
+    // frsmID [0] IMPLICIT Integer32
+    let (tag_byte, _, _, inner, rem) = parse_ber_tlv(content).ok()?;
+    if tag_byte != 0x80 {
+        return None;
+    }
+    let frsm_id = parse_ber_integer(inner).unwrap_or(0);
+
+    let mut file_size = None;
+    let mut last_modified = None;
+
+    // fileAttributes [1] IMPLICIT FileAttributes (SEQUENCE)
+    if !rem.is_empty() {
+        if let Ok((tag2, _, _, attr_inner, _)) = parse_ber_tlv(rem) {
+            if tag2 == 0xA1 {
+                let mut pos = attr_inner;
+                while !pos.is_empty() {
+                    if let Ok((attr_tag, _, _, attr_content, attr_rem)) = parse_ber_tlv(pos) {
+                        match attr_tag {
+                            0x80 => {
+                                // sizeOfFile [0] IMPLICIT Unsigned32
+                                file_size = parse_ber_integer(attr_content).ok();
+                            }
+                            0x81 => {
+                                // lastModified [1] IMPLICIT GeneralizedTime
+                                last_modified = Some(parse_ber_string(attr_content));
+                            }
+                            _ => {}
+                        }
+                        pos = attr_rem;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Some(MmsFileOpenResponse {
+        frsm_id,
+        file_size,
+        last_modified,
+    })
+}
+
 /// Parse a Confirmed-ResponsePDU.
 fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> {
     if depth > MAX_BER_DEPTH {
@@ -1002,6 +1061,7 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
             read_info: None,
             get_var_access_attr_info: None,
             write_info: None,
+            file_open_info: None,
         });
     }
 
@@ -1013,6 +1073,7 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
     let mut read_info = None;
     let mut get_var_access_attr_info = None;
     let mut write_info = None;
+    let mut file_open_info = None;
     if service == MmsConfirmedService::GetNameList {
         get_name_list_info = Some(parse_get_name_list_response(service_content, depth + 1));
     } else if service == MmsConfirmedService::GetNamedVariableListAttributes {
@@ -1023,6 +1084,8 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
         get_var_access_attr_info = Some(parse_get_var_access_attr_response(service_content, depth + 1));
     } else if service == MmsConfirmedService::Write {
         write_info = Some(parse_write_response(service_content, depth + 1));
+    } else if service == MmsConfirmedService::FileOpen {
+        file_open_info = parse_file_open_response(service_content, depth + 1);
     }
 
     Ok(MmsPdu::ConfirmedResponse {
@@ -1033,6 +1096,7 @@ fn parse_confirmed_response(content: &[u8], depth: usize) -> Result<MmsPdu, ()> 
         read_info,
         get_var_access_attr_info,
         write_info,
+        file_open_info,
     })
 }
 
@@ -2874,6 +2938,76 @@ mod tests {
         ];
         for case in cases {
             let _ = parse_mms_pdu(case);
+        }
+    }
+
+    // ====== FileOpen Response 解析测试 ======
+
+    #[test]
+    fn test_file_open_response_with_attributes() {
+        // FileOpen-Response: frsmID=7, sizeOfFile=4096, lastModified="20240101120000Z"
+        //
+        // frsmID [0]: 80 01 07 = 3 bytes
+        // fileAttributes [1]: A1 15 = 2 + 21 = 23 bytes
+        //   sizeOfFile [0]: 80 02 10 00 = 4 bytes
+        //   lastModified [1]: 81 0F + 15 bytes = 17 bytes
+        // FileOpen content = 3 + 23 = 26 bytes
+        // FileOpen tag: BF 49 1A = 2 + 1 + 26 = 29 bytes
+        // invokeID: 02 01 03 = 3 bytes
+        // Total inner = 3 + 29 = 32 = 0x20
+        let last_mod = b"20240101120000Z"; // 15 bytes
+        let data: Vec<u8> = [
+            &[0xA1, 0x20][..],           // [1] ConfirmedResponse, len=32
+            &[0x02, 0x01, 0x03],          // invokeID = 3
+            &[0xBF, 0x49, 0x1A],          // [73] FileOpen, len=26
+            &[0x80, 0x01, 0x07],          // frsmID [0] = 7
+            &[0xA1, 0x15],                // fileAttributes [1], len=21
+            &[0x80, 0x02, 0x10, 0x00],    // sizeOfFile [0] = 4096
+            &[0x81, 0x0F],                // lastModified [1], len=15
+            last_mod,
+        ].concat();
+
+        let pdu = parse_mms_pdu(&data).expect("should parse FileOpen response");
+        match &pdu {
+            MmsPdu::ConfirmedResponse { invoke_id, service, file_open_info, .. } => {
+                assert_eq!(*invoke_id, 3);
+                assert_eq!(*service, MmsConfirmedService::FileOpen);
+                let fo = file_open_info.as_ref().expect("file_open_info should be Some");
+                assert_eq!(fo.frsm_id, 7);
+                assert_eq!(fo.file_size, Some(4096));
+                assert_eq!(fo.last_modified.as_deref(), Some("20240101120000Z"));
+            }
+            _ => panic!("Expected ConfirmedResponse"),
+        }
+    }
+
+    #[test]
+    fn test_file_open_response_no_last_modified() {
+        // FileOpen-Response: frsmID=1, sizeOfFile=256, 无 lastModified
+        //
+        // frsmID: 80 01 01 = 3 bytes
+        // fileAttributes: A1 04 → sizeOfFile: 80 02 01 00 = 4 bytes
+        //   A1 04 = 2 + 4 = 6 bytes
+        // FileOpen content = 3 + 6 = 9 → BF 49 09 = 2+1+9 = 12
+        // invokeID: 02 01 01 = 3 → total = 3 + 12 = 15 = 0x0F
+        let data: Vec<u8> = [
+            &[0xA1, 0x0F][..],
+            &[0x02, 0x01, 0x01],          // invokeID = 1
+            &[0xBF, 0x49, 0x09],          // [73] FileOpen, len=9
+            &[0x80, 0x01, 0x01],          // frsmID = 1
+            &[0xA1, 0x04],                // fileAttributes, len=4
+            &[0x80, 0x02, 0x01, 0x00],    // sizeOfFile = 256
+        ].concat();
+
+        let pdu = parse_mms_pdu(&data).expect("should parse");
+        match &pdu {
+            MmsPdu::ConfirmedResponse { file_open_info, .. } => {
+                let fo = file_open_info.as_ref().expect("should have file_open_info");
+                assert_eq!(fo.frsm_id, 1);
+                assert_eq!(fo.file_size, Some(256));
+                assert_eq!(fo.last_modified, None, "missing lastModified should be None");
+            }
+            _ => panic!("Expected ConfirmedResponse"),
         }
     }
 }

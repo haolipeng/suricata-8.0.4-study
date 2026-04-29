@@ -297,6 +297,23 @@ pub struct MmsFileOpenRequest {
     pub initial_position: u32,      // 初始读取位置（字节偏移）
 }
 
+/// FileOpen-Response 解析结果。
+///
+/// FileOpen-Response ::= SEQUENCE {
+///     frsmID         [0] IMPLICIT Integer32,
+///     fileAttributes [1] IMPLICIT FileAttributes
+/// }
+/// FileAttributes ::= SEQUENCE {
+///     sizeOfFile    [0] IMPLICIT Unsigned32,
+///     lastModified  [1] IMPLICIT GeneralizedTime OPTIONAL
+/// }
+#[derive(Debug, Clone, PartialEq)]
+pub struct MmsFileOpenResponse {
+    pub frsm_id: u32,                   // 文件读取状态机 ID
+    pub file_size: Option<u32>,          // 文件大小（字节）
+    pub last_modified: Option<String>,   // 最后修改时间（GeneralizedTime 字符串）
+}
+
 /// GetNamedVariableListAttributes 响应数据。
 ///
 /// GetNamedVariableListAttributes-Response ::= SEQUENCE {
@@ -379,6 +396,7 @@ pub enum MmsPdu {
         read_info: Option<MmsReadResponse>,
         get_var_access_attr_info: Option<MmsGetVarAccessAttrResponse>,
         write_info: Option<MmsWriteResponse>,
+        file_open_info: Option<MmsFileOpenResponse>,
     },
     ConfirmedError {                          // [2] 确认错误
         invoke_id: u32,
@@ -614,6 +632,7 @@ mod tests {
             service: MmsConfirmedService::Write,
             get_name_list_info: None, get_named_var_list_attr_info: None,
             read_info: None, get_var_access_attr_info: None, write_info: None,
+            file_open_info: None,
         };
         assert_eq!(pdu.service_str(), Some("write"));
 
@@ -646,6 +665,7 @@ mod tests {
             service: MmsConfirmedService::Status,
             get_name_list_info: None, get_named_var_list_attr_info: None,
             read_info: None, get_var_access_attr_info: None, write_info: None,
+            file_open_info: None,
         };
         assert_eq!(pdu.invoke_id(), Some(7));
 
