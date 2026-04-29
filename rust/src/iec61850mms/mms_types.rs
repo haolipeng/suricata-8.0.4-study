@@ -698,4 +698,87 @@ mod tests {
         assert_eq!(pdu.first_write_variable(), None);
         assert_eq!(pdu.first_write_domain(), None);
     }
+
+    // ====== multi-buffer 索引提取测试（模拟 detect.rs 中 local_id 迭代） ======
+
+    /// 从 Write 请求 PDU 中提取 variable_specs，模拟 detect.rs 的 get 回调逻辑
+    fn get_write_variable_specs(pdu: &MmsPdu) -> Option<&Vec<ObjectNameRef>> {
+        if let MmsPdu::ConfirmedRequest { write_info: Some(ref wi), .. } = pdu {
+            Some(&wi.variable_specs)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn test_multi_buffer_write_variable_3_items() {
+        // 3 个变量的 Write 请求，模拟 local_id=0,1,2 分别返回对应变量名
+        let pdu = make_write_request_pdu(vec![
+            ObjectNameRef::DomainSpecific {
+                domain_id: "Domain1".to_string(),
+                item_id: "Var1$ST$stVal".to_string(),
+            },
+            ObjectNameRef::DomainSpecific {
+                domain_id: "Domain2".to_string(),
+                item_id: "Var2$CO$ctlVal".to_string(),
+            },
+            ObjectNameRef::VmdSpecific("VmdVar3".to_string()),
+        ]);
+
+        let specs = get_write_variable_specs(&pdu).unwrap();
+        assert_eq!(specs.len(), 3);
+
+        // local_id=0
+        match &specs[0] {
+            ObjectNameRef::DomainSpecific { item_id, .. } => assert_eq!(item_id, "Var1$ST$stVal"),
+            _ => panic!("expected DomainSpecific"),
+        }
+        // local_id=1
+        match &specs[1] {
+            ObjectNameRef::DomainSpecific { item_id, .. } => assert_eq!(item_id, "Var2$CO$ctlVal"),
+            _ => panic!("expected DomainSpecific"),
+        }
+        // local_id=2
+        match &specs[2] {
+            ObjectNameRef::VmdSpecific(s) => assert_eq!(s, "VmdVar3"),
+            _ => panic!("expected VmdSpecific"),
+        }
+        // local_id=3 → 越界
+        assert!(specs.get(3).is_none());
+    }
+
+    #[test]
+    fn test_multi_buffer_write_domain_mixed_specs() {
+        // 混合 vmd_specific 和 domain_specific，验证 domain 提取逻辑
+        let pdu = make_write_request_pdu(vec![
+            ObjectNameRef::VmdSpecific("VmdVar".to_string()),
+            ObjectNameRef::DomainSpecific {
+                domain_id: "MyDomain".to_string(),
+                item_id: "Item1".to_string(),
+            },
+            ObjectNameRef::AaSpecific("AaVar".to_string()),
+        ]);
+
+        let specs = get_write_variable_specs(&pdu).unwrap();
+
+        // local_id=0: VmdSpecific → 无 domain
+        assert!(!matches!(&specs[0], ObjectNameRef::DomainSpecific { .. }));
+
+        // local_id=1: DomainSpecific → 有 domain
+        match &specs[1] {
+            ObjectNameRef::DomainSpecific { domain_id, .. } => assert_eq!(domain_id, "MyDomain"),
+            _ => panic!("expected DomainSpecific at index 1"),
+        }
+
+        // local_id=2: AaSpecific → 无 domain
+        assert!(!matches!(&specs[2], ObjectNameRef::DomainSpecific { .. }));
+    }
+
+    #[test]
+    fn test_multi_buffer_empty_specs_no_panic() {
+        let pdu = make_write_request_pdu(vec![]);
+        let specs = get_write_variable_specs(&pdu).unwrap();
+        assert!(specs.is_empty());
+        assert!(specs.get(0).is_none());
+    }
 }
