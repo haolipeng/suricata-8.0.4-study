@@ -20,6 +20,8 @@
 //! Registers sticky buffers:
 //! - `iec61850_mms.service` - matches on the service name string
 //! - `iec61850_mms.pdu_type` - matches on the PDU type string
+//! - `iec61850_mms.write_variable` - matches on the first Write request variable name
+//! - `iec61850_mms.write_domain` - matches on the first Write request domain name
 
 use super::mms::{MmsTransaction, ALPROTO_IEC61850_MMS};
 use crate::core::{STREAM_TOCLIENT, STREAM_TOSERVER};
@@ -33,6 +35,8 @@ use suricata_sys::sys::{
 // Sticky buffer ID，由检测引擎分配，用于在规则中引用对应的内容缓冲区
 static mut G_IEC61850_MMS_SERVICE_BUFFER_ID: c_int = 0;
 static mut G_IEC61850_MMS_PDU_TYPE_BUFFER_ID: c_int = 0;
+static mut G_IEC61850_MMS_WRITE_VARIABLE_BUFFER_ID: c_int = 0;
+static mut G_IEC61850_MMS_WRITE_DOMAIN_BUFFER_ID: c_int = 0;
 
 // --- iec61850_mms.service keyword ---
 
@@ -94,9 +98,72 @@ unsafe extern "C" fn iec61850_mms_pdu_type_get(
     return false;
 }
 
-/// 向 Suricata 检测引擎注册两个 sticky buffer 关键字：
+// --- iec61850_mms.write_variable keyword ---
+
+/// write_variable 关键字的 setup 回调
+unsafe extern "C" fn iec61850_mms_write_variable_setup(
+    de: *mut DetectEngineCtx, s: *mut Signature, _raw: *const std::os::raw::c_char,
+) -> c_int {
+    if SCDetectSignatureSetAppProto(s, ALPROTO_IEC61850_MMS) != 0 {
+        return -1;
+    }
+    if SCDetectBufferSetActiveList(de, s, G_IEC61850_MMS_WRITE_VARIABLE_BUFFER_ID) < 0 {
+        return -1;
+    }
+    return 0;
+}
+
+/// 获取 Write 请求中第一个变量名，供检测引擎进行内容匹配
+unsafe extern "C" fn iec61850_mms_write_variable_get(
+    tx: *const c_void, _flags: u8, buf: *mut *const u8, len: *mut u32,
+) -> bool {
+    let tx = cast_pointer!(tx, MmsTransaction);
+    if let Some(ref pdu) = tx.pdu {
+        if let Some(var_name) = pdu.first_write_variable() {
+            *len = var_name.len() as u32;
+            *buf = var_name.as_ptr();
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- iec61850_mms.write_domain keyword ---
+
+/// write_domain 关键字的 setup 回调
+unsafe extern "C" fn iec61850_mms_write_domain_setup(
+    de: *mut DetectEngineCtx, s: *mut Signature, _raw: *const std::os::raw::c_char,
+) -> c_int {
+    if SCDetectSignatureSetAppProto(s, ALPROTO_IEC61850_MMS) != 0 {
+        return -1;
+    }
+    if SCDetectBufferSetActiveList(de, s, G_IEC61850_MMS_WRITE_DOMAIN_BUFFER_ID) < 0 {
+        return -1;
+    }
+    return 0;
+}
+
+/// 获取 Write 请求中第一个变量的 domain 名称，供检测引擎进行内容匹配。
+/// 仅 DomainSpecific 变量有 domain，VmdSpecific/AaSpecific 返回 false（buffer 为空）。
+unsafe extern "C" fn iec61850_mms_write_domain_get(
+    tx: *const c_void, _flags: u8, buf: *mut *const u8, len: *mut u32,
+) -> bool {
+    let tx = cast_pointer!(tx, MmsTransaction);
+    if let Some(ref pdu) = tx.pdu {
+        if let Some(domain) = pdu.first_write_domain() {
+            *len = domain.len() as u32;
+            *buf = domain.as_ptr();
+            return true;
+        }
+    }
+    return false;
+}
+
+/// 向 Suricata 检测引擎注册 sticky buffer 关键字：
 /// - iec61850_mms.service：匹配 MMS 服务名称（如 "read"、"write"）
 /// - iec61850_mms.pdu_type：匹配 PDU 类型（如 "confirmed_request"）
+/// - iec61850_mms.write_variable：匹配 Write 请求第一个变量名
+/// - iec61850_mms.write_domain：匹配 Write 请求第一个变量的 domain
 #[no_mangle]
 pub unsafe extern "C" fn SCDetectIec61850MmsRegister() {
     // Register iec61850_mms.service sticky buffer
@@ -129,5 +196,37 @@ pub unsafe extern "C" fn SCDetectIec61850MmsRegister() {
         ALPROTO_IEC61850_MMS,
         STREAM_TOSERVER | STREAM_TOCLIENT,
         Some(iec61850_mms_pdu_type_get),
+    );
+
+    // Register iec61850_mms.write_variable sticky buffer
+    let kw = SigTableElmtStickyBuffer {
+        name: String::from("iec61850_mms.write_variable"),
+        desc: String::from("IEC 61850 MMS Write request variable name"),
+        url: String::from("/rules/iec61850-mms-keywords.html#write-variable"),
+        setup: iec61850_mms_write_variable_setup,
+    };
+    let _kw_id = helper_keyword_register_sticky_buffer(&kw);
+    G_IEC61850_MMS_WRITE_VARIABLE_BUFFER_ID = SCDetectHelperBufferMpmRegister(
+        b"iec61850_mms.write_variable\0".as_ptr() as *const libc::c_char,
+        b"IEC 61850 MMS Write variable name\0".as_ptr() as *const libc::c_char,
+        ALPROTO_IEC61850_MMS,
+        STREAM_TOSERVER,
+        Some(iec61850_mms_write_variable_get),
+    );
+
+    // Register iec61850_mms.write_domain sticky buffer
+    let kw = SigTableElmtStickyBuffer {
+        name: String::from("iec61850_mms.write_domain"),
+        desc: String::from("IEC 61850 MMS Write request domain name"),
+        url: String::from("/rules/iec61850-mms-keywords.html#write-domain"),
+        setup: iec61850_mms_write_domain_setup,
+    };
+    let _kw_id = helper_keyword_register_sticky_buffer(&kw);
+    G_IEC61850_MMS_WRITE_DOMAIN_BUFFER_ID = SCDetectHelperBufferMpmRegister(
+        b"iec61850_mms.write_domain\0".as_ptr() as *const libc::c_char,
+        b"IEC 61850 MMS Write domain name\0".as_ptr() as *const libc::c_char,
+        ALPROTO_IEC61850_MMS,
+        STREAM_TOSERVER,
+        Some(iec61850_mms_write_domain_get),
     );
 }

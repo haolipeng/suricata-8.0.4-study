@@ -400,6 +400,34 @@ impl MmsPdu {
         }
     }
 
+    /// 提取 Write 请求中第一个变量的名称。
+    /// - DomainSpecific → item_id
+    /// - VmdSpecific / AaSpecific → 直接返回变量名
+    pub fn first_write_variable(&self) -> Option<&str> {
+        if let MmsPdu::ConfirmedRequest { write_info: Some(ref wi), .. } = self {
+            wi.variable_specs.first().map(|spec| match spec {
+                ObjectNameRef::VmdSpecific(s) => s.as_str(),
+                ObjectNameRef::DomainSpecific { item_id, .. } => item_id.as_str(),
+                ObjectNameRef::AaSpecific(s) => s.as_str(),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// 提取 Write 请求中第一个变量的 domain 名称。
+    /// 仅 DomainSpecific 有值，VmdSpecific / AaSpecific 返回 None。
+    pub fn first_write_domain(&self) -> Option<&str> {
+        if let MmsPdu::ConfirmedRequest { write_info: Some(ref wi), .. } = self {
+            wi.variable_specs.first().and_then(|spec| match spec {
+                ObjectNameRef::DomainSpecific { domain_id, .. } => Some(domain_id.as_str()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn invoke_id(&self) -> Option<u32> {
         match self {
             MmsPdu::ConfirmedRequest { invoke_id, .. } => Some(*invoke_id),
@@ -594,5 +622,80 @@ mod tests {
         assert_eq!(MmsPdu::ConcludeResponse.invoke_id(), None);
         assert_eq!(MmsPdu::InitiateRequest { detail: None }.invoke_id(), None);
         assert_eq!(MmsPdu::CancelError.invoke_id(), None);
+    }
+
+    // ====== first_write_variable / first_write_domain 测试 ======
+
+    /// 构造一个 Write 请求 PDU 的辅助函数
+    fn make_write_request_pdu(specs: Vec<ObjectNameRef>) -> MmsPdu {
+        MmsPdu::ConfirmedRequest {
+            invoke_id: 1,
+            service: MmsConfirmedService::Write,
+            read_info: None,
+            write_info: Some(MmsWriteRequest {
+                variable_specs: specs,
+                data: vec![],
+            }),
+            get_name_list_info: None,
+            get_var_access_attr_info: None,
+            get_named_var_list_attr_info: None,
+        }
+    }
+
+    #[test]
+    fn test_write_variable_from_domain_specific() {
+        let pdu = make_write_request_pdu(vec![
+            ObjectNameRef::DomainSpecific {
+                domain_id: "TestDomain".to_string(),
+                item_id: "GGIO1$ST$Ind1$stVal".to_string(),
+            },
+        ]);
+        assert_eq!(pdu.first_write_variable(), Some("GGIO1$ST$Ind1$stVal"));
+    }
+
+    #[test]
+    fn test_write_domain_from_domain_specific() {
+        let pdu = make_write_request_pdu(vec![
+            ObjectNameRef::DomainSpecific {
+                domain_id: "TestDomain".to_string(),
+                item_id: "GGIO1$ST$Ind1$stVal".to_string(),
+            },
+        ]);
+        assert_eq!(pdu.first_write_domain(), Some("TestDomain"));
+    }
+
+    #[test]
+    fn test_write_domain_none_for_vmd_specific() {
+        let pdu = make_write_request_pdu(vec![
+            ObjectNameRef::VmdSpecific("VmdVar1".to_string()),
+        ]);
+        // VmdSpecific 没有 domain，应返回 None
+        assert_eq!(pdu.first_write_domain(), None);
+        // 但 variable 名应正常返回
+        assert_eq!(pdu.first_write_variable(), Some("VmdVar1"));
+    }
+
+    #[test]
+    fn test_write_variable_none_for_non_write_pdu() {
+        // Read 请求不应返回 write variable
+        let pdu = MmsPdu::ConfirmedRequest {
+            invoke_id: 1,
+            service: MmsConfirmedService::Read,
+            read_info: None,
+            write_info: None,
+            get_name_list_info: None,
+            get_var_access_attr_info: None,
+            get_named_var_list_attr_info: None,
+        };
+        assert_eq!(pdu.first_write_variable(), None);
+        assert_eq!(pdu.first_write_domain(), None);
+    }
+
+    #[test]
+    fn test_write_variable_empty_specs() {
+        // Write 请求但 variable_specs 为空
+        let pdu = make_write_request_pdu(vec![]);
+        assert_eq!(pdu.first_write_variable(), None);
+        assert_eq!(pdu.first_write_domain(), None);
     }
 }
