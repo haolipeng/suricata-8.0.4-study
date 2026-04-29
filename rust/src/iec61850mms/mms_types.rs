@@ -460,6 +460,16 @@ impl MmsPdu {
         }
     }
 
+    /// 提取文件服务事务中的主文件路径。
+    /// 当前支持 FileOpen；后续 FileDelete/FileRename/ObtainFile 解析完成后自动接入。
+    pub fn file_name(&self) -> Option<&str> {
+        if let MmsPdu::ConfirmedRequest { file_open_info: Some(ref fo), .. } = self {
+            Some(fo.file_name.as_str())
+        } else {
+            None
+        }
+    }
+
     pub fn invoke_id(&self) -> Option<u32> {
         match self {
             MmsPdu::ConfirmedRequest { invoke_id, .. } => Some(*invoke_id),
@@ -816,5 +826,51 @@ mod tests {
         let specs = get_write_variable_specs(&pdu).unwrap();
         assert!(specs.is_empty());
         assert!(specs.get(0).is_none());
+    }
+
+    // ====== file_name() 方法测试 ======
+
+    #[test]
+    fn test_file_name_from_file_open_request() {
+        let pdu = MmsPdu::ConfirmedRequest {
+            invoke_id: 1,
+            service: MmsConfirmedService::FileOpen,
+            read_info: None,
+            write_info: None,
+            get_name_list_info: None,
+            get_var_access_attr_info: None,
+            get_named_var_list_attr_info: None,
+            file_open_info: Some(MmsFileOpenRequest {
+                file_name: "firmware.bin".to_string(),
+                initial_position: 0,
+            }),
+        };
+        assert_eq!(pdu.file_name(), Some("firmware.bin"));
+    }
+
+    #[test]
+    fn test_file_name_none_for_read_request() {
+        let pdu = MmsPdu::ConfirmedRequest {
+            invoke_id: 1,
+            service: MmsConfirmedService::Read,
+            read_info: None,
+            write_info: None,
+            get_name_list_info: None,
+            get_var_access_attr_info: None,
+            get_named_var_list_attr_info: None,
+            file_open_info: None,
+        };
+        assert_eq!(pdu.file_name(), None);
+    }
+
+    #[test]
+    fn test_file_name_none_for_write_request() {
+        let pdu = make_write_request_pdu(vec![
+            ObjectNameRef::DomainSpecific {
+                domain_id: "D".to_string(),
+                item_id: "Var".to_string(),
+            },
+        ]);
+        assert_eq!(pdu.file_name(), None);
     }
 }

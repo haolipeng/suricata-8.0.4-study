@@ -22,6 +22,7 @@
 //! - `iec61850_mms.pdu_type` - matches on the PDU type string
 //! - `iec61850_mms.write_variable` - matches on Write request variable names (multi-buffer)
 //! - `iec61850_mms.write_domain` - matches on Write request domain names (multi-buffer)
+//! - `iec61850_mms.file_name` - matches on file service request file path
 
 use super::mms::{MmsTransaction, ALPROTO_IEC61850_MMS};
 use super::mms_types::{MmsPdu, ObjectNameRef};
@@ -40,6 +41,7 @@ static mut G_IEC61850_MMS_SERVICE_BUFFER_ID: c_int = 0;
 static mut G_IEC61850_MMS_PDU_TYPE_BUFFER_ID: c_int = 0;
 static mut G_IEC61850_MMS_WRITE_VARIABLE_BUFFER_ID: c_int = 0;
 static mut G_IEC61850_MMS_WRITE_DOMAIN_BUFFER_ID: c_int = 0;
+static mut G_IEC61850_MMS_FILE_NAME_BUFFER_ID: c_int = 0;
 
 // --- iec61850_mms.service keyword ---
 
@@ -183,11 +185,43 @@ unsafe extern "C" fn iec61850_mms_write_domain_get(
     return false;
 }
 
+// --- iec61850_mms.file_name keyword ---
+
+/// file_name 关键字的 setup 回调
+unsafe extern "C" fn iec61850_mms_file_name_setup(
+    de: *mut DetectEngineCtx, s: *mut Signature, _raw: *const std::os::raw::c_char,
+) -> c_int {
+    if SCDetectSignatureSetAppProto(s, ALPROTO_IEC61850_MMS) != 0 {
+        return -1;
+    }
+    if SCDetectBufferSetActiveList(de, s, G_IEC61850_MMS_FILE_NAME_BUFFER_ID) < 0 {
+        return -1;
+    }
+    return 0;
+}
+
+/// 获取文件服务事务中的主文件路径，供检测引擎进行内容匹配。
+/// 当前支持 FileOpen；后续 FileDelete/FileRename 等解析完成后自动接入。
+unsafe extern "C" fn iec61850_mms_file_name_get(
+    tx: *const c_void, _flags: u8, buf: *mut *const u8, len: *mut u32,
+) -> bool {
+    let tx = cast_pointer!(tx, MmsTransaction);
+    if let Some(ref pdu) = tx.pdu {
+        if let Some(name) = pdu.file_name() {
+            *len = name.len() as u32;
+            *buf = name.as_ptr();
+            return true;
+        }
+    }
+    return false;
+}
+
 /// 向 Suricata 检测引擎注册 sticky buffer 关键字：
 /// - iec61850_mms.service：匹配 MMS 服务名称（如 "read"、"write"）
 /// - iec61850_mms.pdu_type：匹配 PDU 类型（如 "confirmed_request"）
 /// - iec61850_mms.write_variable：匹配 Write 请求变量名（multi-buffer，逐个匹配）
 /// - iec61850_mms.write_domain：匹配 Write 请求变量的 domain（multi-buffer，逐个匹配）
+/// - iec61850_mms.file_name：匹配文件服务请求的文件路径
 #[no_mangle]
 pub unsafe extern "C" fn SCDetectIec61850MmsRegister() {
     // Register iec61850_mms.service sticky buffer
@@ -252,5 +286,21 @@ pub unsafe extern "C" fn SCDetectIec61850MmsRegister() {
         ALPROTO_IEC61850_MMS,
         STREAM_TOSERVER,
         Some(iec61850_mms_write_domain_get),
+    );
+
+    // Register iec61850_mms.file_name sticky buffer
+    let kw = SigTableElmtStickyBuffer {
+        name: String::from("iec61850_mms.file_name"),
+        desc: String::from("IEC 61850 MMS file service file path"),
+        url: String::from("/rules/iec61850-mms-keywords.html#file-name"),
+        setup: iec61850_mms_file_name_setup,
+    };
+    let _kw_id = helper_keyword_register_sticky_buffer(&kw);
+    G_IEC61850_MMS_FILE_NAME_BUFFER_ID = SCDetectHelperBufferMpmRegister(
+        b"iec61850_mms.file_name\0".as_ptr() as *const libc::c_char,
+        b"IEC 61850 MMS file path\0".as_ptr() as *const libc::c_char,
+        ALPROTO_IEC61850_MMS,
+        STREAM_TOSERVER,
+        Some(iec61850_mms_file_name_get),
     );
 }
