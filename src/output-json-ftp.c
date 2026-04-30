@@ -46,6 +46,66 @@
 #include "app-layer-ftp.h"
 #include "output-json-ftp.h"
 
+#include <ctype.h>
+
+/**
+ * \brief 尝试从 FTP 220 banner 响应中提取软件名和版本号。
+ *
+ * 支持格式：
+ *   vsftpd:   "(vsFTPd 3.0.5)"         -> name="vsFTPd",  version="3.0.5"
+ *   ProFTPD:  "ProFTPD 1.3.8 Server …" -> name="ProFTPD", version="1.3.8"
+ *
+ * \param reply     220 状态码后的响应文本（例如 "(vsFTPd 3.0.5)"）
+ * \param reply_len 响应长度
+ * \param jb        用于写入 "banner" 对象的 JsonBuilder
+ */
+static void FTPLogBannerInfo(
+        const uint8_t *reply, uint32_t reply_len, SCJsonBuilder *jb)
+{
+    if (reply == NULL || reply_len == 0)
+        return;
+
+    const char *r = (const char *)reply;
+    const uint32_t len = reply_len;
+
+    /* --- vsftpd: "(vsFTPd X.Y.Z)" --- */
+    const char *vs_prefix = "(vsFTPd ";
+    size_t vs_prefix_len = strlen(vs_prefix);
+    if (len > vs_prefix_len && memcmp(r, vs_prefix, vs_prefix_len) == 0) {
+        /* 查找结束 ')'，用于确定版本字符串边界 */
+        const char *end = memchr(r + vs_prefix_len, ')', len - vs_prefix_len);
+        if (end && end > r + vs_prefix_len) {
+            uint32_t ver_len = (uint32_t)(end - (r + vs_prefix_len));
+            SCJbOpenObject(jb, "banner");
+            SCJbSetString(jb, "software_name", "vsFTPd");
+            SCJbSetStringFromBytes(jb, "software_version",
+                    (const uint8_t *)(r + vs_prefix_len), ver_len);
+            SCJbClose(jb);
+        }
+        return;
+    }
+
+    /* --- ProFTPD: "ProFTPD X.Y.Z Server …" --- */
+    const char *pro_prefix = "ProFTPD ";
+    size_t pro_prefix_len = strlen(pro_prefix);
+    if (len > pro_prefix_len && memcmp(r, pro_prefix, pro_prefix_len) == 0) {
+        /* 版本号在下一个空格处结束 */
+        const char *ver_start = r + pro_prefix_len;
+        const char *ver_end = memchr(ver_start, ' ', len - pro_prefix_len);
+        if (ver_end == NULL)
+            ver_end = r + len; /* 没有空格：剩余部分都视为版本号 */
+        uint32_t ver_len = (uint32_t)(ver_end - ver_start);
+        if (ver_len > 0) {
+            SCJbOpenObject(jb, "banner");
+            SCJbSetString(jb, "software_name", "ProFTPD");
+            SCJbSetStringFromBytes(jb, "software_version",
+                    (const uint8_t *)ver_start, ver_len);
+            SCJbClose(jb);
+        }
+        return;
+    }
+}
+
 bool EveFTPLogCommand(void *vtx, SCJsonBuilder *jb)
 {
     FTPTransaction *tx = vtx;
@@ -89,6 +149,8 @@ bool EveFTPLogCommand(void *vtx, SCJsonBuilder *jb)
         int resp_cnt = 0;
         FTPResponseWrapper *wrapper;
         bool is_cc_array_open = false;
+        const uint8_t *banner_reply = NULL;
+        uint32_t banner_reply_len = 0;
         TAILQ_FOREACH (wrapper, &tx->response_list, next) {
             /* handle multiple lines within the response, \r\n delimited */
             if (!wrapper->response) {
@@ -106,6 +168,14 @@ bool EveFTPLogCommand(void *vtx, SCJsonBuilder *jb)
                 }
                 SCJbAppendStringFromBytes(
                         jb, (const uint8_t *)response->code, (uint32_t)response->code_length);
+
+                /* Remember 220 banner reply for later extraction */
+                if (response->code_length == 3 &&
+                        response->code[0] == '2' && response->code[1] == '2' &&
+                        response->code[2] == '0' && response->length > 0) {
+                    banner_reply = response->response;
+                    banner_reply_len = (uint32_t)response->length;
+                }
             }
             if (response->length) {
                 SCJbAppendStringFromBytes(js_resplist, (const uint8_t *)response->response,
@@ -122,6 +192,12 @@ bool EveFTPLogCommand(void *vtx, SCJsonBuilder *jb)
             SCJbSetObject(jb, "reply", js_resplist);
         }
         SCJbFree(js_resplist);
+
+        /* Extract banner info after arrays are closed */
+        if (banner_reply != NULL) {
+            //数组关闭后写入 banner 对象
+            FTPLogBannerInfo(banner_reply, banner_reply_len, jb);
+        }
     }
 
     if (tx->dyn_port) {
