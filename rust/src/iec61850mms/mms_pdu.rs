@@ -1407,8 +1407,8 @@ mod tests {
 
     #[test]
     fn test_parse_conclude_request() {
-        // ConcludeRequest: [11] (0xAB) with empty content
-        let data = &[0xAB, 0x00];
+        // ConcludeRequest: [11] IMPLICIT NULL — primitive encoding (0x8B)
+        let data = &[0x8B, 0x00];
         let result = parse_mms_pdu(data);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), MmsPdu::ConcludeRequest);
@@ -1416,7 +1416,8 @@ mod tests {
 
     #[test]
     fn test_parse_conclude_response() {
-        let data = &[0xAC, 0x00];
+        // ConcludeResponse: [12] IMPLICIT NULL — primitive encoding (0x8C)
+        let data = &[0x8C, 0x00];
         let result = parse_mms_pdu(data);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), MmsPdu::ConcludeResponse);
