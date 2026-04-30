@@ -5,8 +5,3 @@
 运行cargo test和cargo clippy命令来验证重构是否正确
 
 
-
-每天都在进步，和AI更好的相处。
-
-
-

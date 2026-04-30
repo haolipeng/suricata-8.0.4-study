@@ -138,38 +138,89 @@ cat "$OUT/s4/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_m
 
 ---
 
-### 场景 5：GetNamedVariableListAttributes（外部 pcap，可选）
+### 场景 5：GetNamedVariableListAttributes（iec61850_get_named_variableList_attributes.pcap）
 
-pcap 来自真实抓包，位于 `/tmp/test_large_12/`，不存在则跳过。
+含 Session/Presentation 层，覆盖 GetNamedVariableListAttributes + GetVariableAccessAttributes。pcap 来自真实抓包。
+
+> **注意**：该 pcap 文件版本为 4.2，部分旧版 Suricata 可能无法直接读取，需先用 `editcap -F pcap` 转换。
 
 ```bash
-GNVLA_PCAP="/tmp/test_large_12/session_254_172.20.4.111_38914.pcap"
-if [ -f "$GNVLA_PCAP" ]; then
-    mkdir -p "$OUT/s5" && rm -rf "$OUT/s5"/*
-    suricata -r "$GNVLA_PCAP" -S /dev/null -c "$SURICATA_YAML" -l "$OUT/s5" 2>/dev/null
-    cat "$OUT/s5/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_mms'
-else
-    echo "SKIP: pcap not found"
-fi
+mkdir -p "$OUT/s5" && rm -rf "$OUT/s5"/*
+editcap -F pcap "$PCAP_DIR/iec61850_get_named_variableList_attributes.pcap" /tmp/gnvla_fixed.pcap 2>/dev/null
+suricata -r /tmp/gnvla_fixed.pcap -S /dev/null -c "$SURICATA_YAML" -l "$OUT/s5" 2>/dev/null
+cat "$OUT/s5/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_mms'
 ```
 
-#### 预期核心事务
+#### 预期输出（共 46 条）
 
-请求：
+Initiate 请求/响应（2 条）：
+```json
+{ "direction": "request",  "pdu_type": "initiate_request",  "local_detail": 32000, "max_serv_outstanding_calling": 10, "max_serv_outstanding_called": 10, "data_structure_nesting_level": 5, "version_number": 1, "supported_services": "6e1c00000002000040ed10" }
+{ "direction": "response", "pdu_type": "initiate_response", "local_detail": 30000, "max_serv_outstanding_calling": 1,  "max_serv_outstanding_called": 5,  "data_structure_nesting_level": 5, "version_number": 1, "supported_services": "ee1c00000000000000e518" }
+```
+
+GNVLA 请求：
 ```json
 { "direction": "request", "pdu_type": "confirmed_request", "invoke_id": 1503081, "service": "get_named_variable_list_attributes", "object_name": { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "LLN0$dsMmtr1" } }
 ```
 
-响应（展示前 5 条，实际共 20 个变量）：
+GNVLA 响应（含 20 个变量的完整列表）：
 ```json
-{ "direction": "response", "pdu_type": "confirmed_response", "invoke_id": 1503081, "service": "get_named_variable_list_attributes", "mms_deletable": false, "variable_count": 20, "variables": [
-  { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR1$MX$SupWh" },
-  { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR1$MX$SupVArh" },
-  { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR1$MX$DmdWh" },
-  { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR1$MX$DmdVArh" },
-  { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR2$MX$SupWh" }
-] }
+{
+  "direction": "response",
+  "pdu_type": "confirmed_response",
+  "invoke_id": 1503081,
+  "service": "get_named_variable_list_attributes",
+  "mms_deletable": false,
+  "variable_count": 20,
+  "variables": [
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR1$MX$SupWh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR1$MX$SupVArh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR1$MX$DmdWh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR1$MX$DmdVArh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR2$MX$SupWh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR2$MX$SupVArh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR2$MX$DmdWh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR2$MX$DmdVArh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR3$MX$SupWh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR3$MX$SupVArh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR3$MX$DmdWh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR3$MX$DmdVArh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR4$MX$SupWh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR4$MX$SupVArh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR4$MX$DmdWh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR4$MX$DmdVArh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR5$MX$SupWh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR5$MX$SupVArh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR5$MX$DmdWh" },
+    { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR5$MX$DmdVArh" }
+  ]
+}
 ```
+
+后续 GVAA 请求/响应（40 条，invoke_id 1503082-1503101）：
+
+对数据集中的每个变量逐一查询 GetVariableAccessAttributes，共 20 对请求/响应。示例（第 1 对）：
+```json
+{ "direction": "request",  "pdu_type": "confirmed_request",  "invoke_id": 1503082, "service": "get_variable_access_attributes", "variable": { "scope": "domain_specific", "domain": "PQMR_1000_941", "item": "MMTR1$MX$SupWh" } }
+{ "direction": "response", "pdu_type": "confirmed_response", "invoke_id": 1503082, "service": "get_variable_access_attributes", "mms_deletable": false, "type_description": "structure" }
+```
+
+所有 20 对 GVAA 响应的 `type_description` 均为 `"structure"`。
+
+Conclude（2 条）：
+```json
+{ "direction": "request",  "pdu_type": "conclude_request" }
+{ "direction": "response", "pdu_type": "conclude_response" }
+```
+
+#### 验证要点
+
+- GNVLA 请求正确解析 `object_name`（domain_specific + domain + item）
+- GNVLA 响应完整提取 20 个变量（未触发 32 条截断上限）
+- `mms_deletable = false` 正确解析
+- 后续 20 对 GVAA 查询逐一解析了每个变量的类型属性
+- Initiate 请求/响应含完整协商参数（双方 supported_services 不同）
 
 ---
 
@@ -392,13 +443,6 @@ cat "$OUT/s12/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_
 | `invoke_id` | uint | Confirmed 类 PDU 的事务 ID（Initiate/Conclude 无此字段） |
 | `service` | string | `read`、`write`、`get_name_list`、`get_variable_access_attributes`、`get_named_variable_list_attributes`、`unknown` 等 |
 
-### ConfirmedError 专有字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `error_class` | string | 错误类别：`vmd-state`、`application-reference`、`definition`、`resource`、`service`、`service-preempt`、`time-resolution`、`access`、`initiate`、`conclude`、`cancel`、`file`、`others` |
-| `error_code` | string | 错误码名称（如 `object-non-existent`），未知码回退为数字字符串 |
-
 ### 各服务专有字段
 
 | 服务 | 方向 | 字段 |
@@ -413,3 +457,307 @@ cat "$OUT/s12/eve.json" | jq 'select(.event_type == "iec61850_mms") | .iec61850_
 | GetNamedVariableListAttributes | request | `object_name` — 含 `scope`、`domain`（可选）、`item` |
 | GetNamedVariableListAttributes | response | `mms_deletable`、`variable_count`、`variables[]` |
 | Initiate | request/response | `local_detail`、`max_serv_outstanding_calling`、`max_serv_outstanding_called`、`data_structure_nesting_level`、`version_number`、`supported_services`（hex） |
+
+---
+
+## 5. 各 PDU 类型 MMS 字段详解
+
+### 5.1 initiate_request
+
+MMS 会话建立请求，客户端向服务端发起关联协商。
+
+```json
+{
+  "direction": "request",
+  "pdu_type": "initiate_request",
+  "local_detail": 64000,
+  "max_serv_outstanding_calling": 10,
+  "max_serv_outstanding_called": 10,
+  "data_structure_nesting_level": 5,
+  "version_number": 1,
+  "supported_services": "a00000000000000000e110"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `local_detail` | uint | 最大 PDU 大小（字节），客户端能接收的最大 MMS PDU 长度 |
+| `max_serv_outstanding_calling` | uint | 主叫方（客户端）允许的最大并发未完成请求数 |
+| `max_serv_outstanding_called` | uint | 被叫方（服务端）允许的最大并发未完成请求数 |
+| `data_structure_nesting_level` | uint | 数据结构最大嵌套层级，限制 structure/array 递归深度 |
+| `version_number` | uint | MMS 协议版本号（通常为 1） |
+| `supported_services` | string | 服务支持位图（hex），每一位对应一种 MMS 服务是否支持 |
+
+> 所有字段均为 `Option`，当 BER 编码中对应标签不存在时不输出。
+
+### 5.2 initiate_response
+
+MMS 会话建立响应，服务端返回协商后的参数。字段含义同 `initiate_request`，但值为服务端协商后的结果（可能小于或等于客户端提议值）。
+
+```json
+{
+  "direction": "response",
+  "pdu_type": "initiate_response",
+  "local_detail": 32000,
+  "max_serv_outstanding_calling": 10,
+  "max_serv_outstanding_called": 8,
+  "data_structure_nesting_level": 5,
+  "version_number": 1,
+  "supported_services": "ee0800000400000001ed18"
+}
+```
+
+### 5.3 confirmed_request
+
+确认请求 PDU，包含 `invoke_id` 和具体服务内容。不同服务类型携带的字段不同，见下方 5.7-5.9 各服务说明。
+
+```json
+{
+  "direction": "request",
+  "pdu_type": "confirmed_request",
+  "invoke_id": 303731,
+  "service": "get_variable_access_attributes",
+  "variable": { "scope": "domain_specific", "domain": "LD1", "item": "LLN0$Mod" }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `invoke_id` | uint | 事务 ID，用于将请求与响应/错误配对 |
+| `service` | string | 服务类型名，如 `read`、`write`、`get_name_list`、`get_variable_access_attributes`、`get_named_variable_list_attributes` 等 |
+| *(服务专有字段)* | — | 见下方 5.7-5.9 |
+
+### 5.4 confirmed_response
+
+确认响应 PDU，与 `confirmed_request` 通过 `invoke_id` 配对。不同服务类型携带的字段不同。
+
+```json
+{
+  "direction": "response",
+  "pdu_type": "confirmed_response",
+  "invoke_id": 303732,
+  "service": "read",
+  "result_count": 2,
+  "results": [
+    { "success": true, "data_type": "integer", "value": "42" },
+    { "success": true, "data_type": "structure", "value": "3 items" }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `invoke_id` | uint | 事务 ID，与对应请求的 `invoke_id` 一致 |
+| `service` | string | 服务类型名，部分最小化响应无法识别服务类型时为 `unknown` |
+| *(服务专有字段)* | — | 见下方 5.7-5.9 |
+
+### 5.5 confirmed_error
+
+确认错误 PDU，表示服务端拒绝了某个确认请求。包含错误类别和具体错误码。
+
+```json
+{
+  "direction": "response",
+  "pdu_type": "confirmed_error",
+  "invoke_id": 303731,
+  "error_class": "access",
+  "error_code": "object-non-existent"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `invoke_id` | uint | 事务 ID，标识被拒绝的请求 |
+| `error_class` | string | 错误类别，13 种取值见下表 |
+| `error_code` | string | 具体错误码名称，各类别下含义不同；未知码回退为数字字符串 |
+
+**error_class 取值：**
+
+| error_class | 说明 | 常见 error_code 示例 |
+|-------------|------|---------------------|
+| `vmd-state` | VMD 状态错误 | `vmd-state-conflict`、`vmd-operational-problem` |
+| `application-reference` | 应用引用错误 | `connection-lost`、`application-reference-invalid` |
+| `definition` | 定义错误 | `object-undefined`、`type-unsupported`、`object-exists` |
+| `resource` | 资源错误 | `memory-unavailable`、`capability-unavailable` |
+| `service` | 服务错误 | `object-state-conflict`、`pdu-size`、`continuation-invalid` |
+| `service-preempt` | 服务抢占 | `timeout`、`deadlock` |
+| `time-resolution` | 时间精度 | `unsupportable-time-resolution` |
+| `access` | 访问错误 | `object-non-existent`、`object-access-denied`、`object-invalidated` |
+| `initiate` | 初始化错误 | `version-incompatible`、`max-segment-insufficient` |
+| `conclude` | 结束错误 | `further-communication-required` |
+| `cancel` | 取消错误 | `invoke-id-unknown`、`cancel-not-possible` |
+| `file` | 文件错误 | `file-non-existent`、`file-access-denied`、`filename-ambiguous` |
+| `others` | 其他 | `other` |
+
+> 注意：`error_class=access` 下的错误码与 Read 响应中 `AccessResult.failure` 的 `DataAccessError` 枚举是**不同的定义**，值与含义不能混用。
+
+### 5.6 GetNameList 服务
+
+**请求字段：**
+
+```json
+{
+  "service": "get_name_list",
+  "object_class": "named_variable",
+  "object_scope": "domain_specific",
+  "domain": "LD1",
+  "continue_after": "Var100"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `service` | string | 解析结果：服务为 `"get_name_list"` |
+| `object_class` | string | 查询的对象类别：`named_variable`、`scattered_access`、`named_variable_list`、`named_type`、`semaphore`、`event_condition`、`event_action`、`event_enrollment`、`journal`、`domain`、`program_invocation`、`operator_station` |
+| `object_scope` | string | 查询范围：`vmd_specific`（全局）、`domain_specific`（域内）、`aa_specific`（关联内） |
+| `domain` | string | 域名，仅 `object_scope = "domain_specific"` 时存在 |
+| `continue_after` | string | 分页续传标识符，首次查询无此字段 |
+
+**响应字段：**
+
+```json
+{
+  "service": "get_name_list",
+  "identifiers": ["MMXU1$MX$TotW", "MMXU1$MX$TotVAr", "MMXU1$MX$Hz"],
+  "more_follows": true
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `service` | string | 解析结果：服务为 `"get_name_list"` |
+| `identifiers` | string[] | 返回的名称列表（上限 64 条，超出截断） |
+| `more_follows` | bool | `true` 表示还有后续数据需分页获取 |
+
+### 5.7 GetVariableAccessAttributes 服务
+
+**请求字段：**
+
+```json
+{
+  "service": "get_variable_access_attributes",
+  "variable": {
+    "scope": "domain_specific",
+    "domain": "LD1",
+    "item": "LLN0$Mod"
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `service` | string | 解析结果：服务为 `"get_variable_access_attributes"` |
+| `variable` | object | 查询的变量名引用 |
+| `variable.scope` | string | 变量作用域：`vmd_specific`（全局）、`domain_specific`（域内）、`aa_specific`（关联内） |
+| `variable.domain` | string | 域名，仅 `scope = "domain_specific"` 时存在 |
+| `variable.item` | string | 变量名 |
+
+**响应字段：**
+
+```json
+{
+  "service": "get_variable_access_attributes",
+  "mms_deletable": false,
+  "type_description": "structure"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `service` | string | 解析结果：服务为 `"get_variable_access_attributes"` |
+| `mms_deletable` | bool | 该变量是否可被 MMS DeleteVariableAccess 删除 |
+| `type_description` | string | 变量的顶层类型名：`array`、`structure`、`boolean`、`bit-string`、`integer`、`unsigned`、`floating-point`、`octet-string`、`visible-string`、`generalized-time`、`binary-time`、`bcd`、`obj-id`、`mms-string`、`utc-time` |
+
+### 5.8 GetNamedVariableListAttributes 服务
+
+**请求字段：**
+
+```json
+{
+  "service": "get_named_variable_list_attributes",
+  "object_name": {
+    "scope": "domain_specific",
+    "domain": "LD1",
+    "item": "dataset01"
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `service` | string | 解析结果：服务为 `"get_named_variable_list_attributes"` |
+| `object_name` | object | 查询的数据集名称引用 |
+| `object_name.scope` | string | 作用域：`vmd_specific`、`domain_specific`、`aa_specific` |
+| `object_name.domain` | string | 域名，仅 `scope = "domain_specific"` 时存在 |
+| `object_name.item` | string | 数据集名称 |
+
+**响应字段：**
+
+```json
+{
+  "service": "get_named_variable_list_attributes",
+  "mms_deletable": false,
+  "variable_count": 3,
+  "variables": [
+    { "scope": "domain_specific", "domain": "LD1", "item": "MMXU1$MX$TotW" },
+    { "scope": "domain_specific", "domain": "LD1", "item": "MMXU1$MX$TotVAr" },
+    { "scope": "domain_specific", "domain": "LD1", "item": "MMXU1$MX$Hz" }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `service` | string | 解析结果：服务为 `"get_named_variable_list_attributes"` |
+| `mms_deletable` | bool | 该数据集是否可被 MMS 删除 |
+| `variable_count` | uint | 数据集中包含的变量数量 |
+| `variables` | object[] | 数据集中的变量列表（上限 32 条，超出截断） |
+| `variables[].scope` | string | 变量作用域：`vmd_specific`、`domain_specific`、`aa_specific` |
+| `variables[].domain` | string | 域名，仅 `scope = "domain_specific"` 时存在 |
+| `variables[].item` | string | 变量名 |
+
+### 5.9 Read 服务
+
+**请求字段：**
+
+```json
+{
+  "service": "read",
+  "variables": [
+    { "scope": "domain_specific", "domain": "LD1", "item": "LLN0$Mod" },
+    { "scope": "domain_specific", "domain": "LD1", "item": "MMXU1$MX$TotW" }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `service` | string | 解析结果：服务为 `"read"` |
+| `variables` | object[] | 读取请求中引用的变量列表 |
+| `variables[].scope` | string | 变量作用域：`vmd_specific`（全局）、`domain_specific`（域内）、`aa_specific`（关联内） |
+| `variables[].domain` | string | 域名，仅 `scope = "domain_specific"` 时存在 |
+| `variables[].item` | string | 变量名（IEC 61850 中通常为 `$` 分隔的路径，如 `MMXU1$MX$TotW$mag$f`） |
+
+**响应字段：**
+
+```json
+{
+  "service": "read",
+  "result_count": 2,
+  "results": [
+    { "success": true, "data_type": "integer", "value": "42" },
+    { "success": true, "data_type": "floating-point", "value": "3.14" },
+    { "success": true, "data_type": "structure", "value": "5 items" },
+    { "success": false }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `service` | string | 解析结果为： `"read"` |
+| `result_count` | uint | 结果数量 |
+| `results` | object[] | AccessResult 列表（上限 64 条，超出截断） |
+| `results[].success` | bool | `true` 表示成功读取数据，`false` 表示该变量读取失败 |
+| `results[].data_type` | string | 数据类型名（仅 `success=true` 时），取值：`array`、`structure`、`boolean`、`bit-string`、`integer`、`unsigned`、`floating-point`、`octet-string`、`visible-string`、`binary-time`、`mms-string`、`utc-time` |
+| `results[].value` | string | 数据值的字符串表示（仅 `success=true` 时）。structure/array 不递归展开，显示为 `"N items"`；浮点数显示为十进制；整数显示为十进制；字符串原样输出；bit-string/binary-time/utc-time 显示为 hex |

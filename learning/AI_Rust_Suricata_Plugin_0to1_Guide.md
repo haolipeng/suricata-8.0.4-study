@@ -85,17 +85,17 @@
   - **事务生命周期**：何时 `new` / 关联 PDU、何时视为完成、`tx_get_alstate_progress` 语义。
   - **注册与 FFI**：以下回调以 `extern "C"` 导出，并在 `SCRegisterXxxParser()` 中挂到 `RustParser`。
 
-    | 回调函数 | 作用 | 注册位置 |
-    |---|---|---|
-    | `probing_parser`（函数） | 协议探测（识别是否本协议流量） | `RustParser.probe_ts` / `RustParser.probe_tc` |
-    | `state_new` / `state_free` | 创建 / 释放协议状态对象 | `RustParser.state_new` / `state_free` |
-    | `state_tx_free` | 按 `tx_id` 释放事务资源 | `RustParser.tx_free` |
-    | `parse_ts` / `parse_tc` | 处理双向流数据并驱动事务生成 | `RustParser.parse_ts` / `parse_tc` |
-    | `state_get_tx` | 按事务编号返回事务指针 | `RustParser.get_tx` |
-    | `state_get_tx_count` | 返回当前状态内事务总数 | `RustParser.get_tx_count` |
-    | `tx_get_alstate_progress` | 返回事务解析进度（用于框架状态判断） | `RustParser.tx_get_progress` |
-    | `export_tx_data_get!` / `export_state_data_get!` | 导出 tx/state 数据访问接口（供 C 侧取数） | 宏导出符号（非 `RustParser` 字段） |
-    | `SCAppLayerParserRegisterLogger` | 挂接协议日志回调 | 注册函数末尾调用 |
+    | 作用 | 注册位置 |
+    |---|---|
+    | 协议探测（识别是否本协议流量） | `RustParser.probe_ts` / `RustParser.probe_tc` |
+    | 创建 / 释放协议状态对象 | `RustParser.state_new` / `state_free` |
+    | 按 `tx_id` 释放事务资源 | `RustParser.tx_free` |
+    | 处理双向流数据并驱动事务生成 | `RustParser.parse_ts` / `parse_tc` |
+    | 按事务编号返回事务指针 | `RustParser.get_tx` |
+    | 返回当前状态内事务总数 | `RustParser.get_tx_count` |
+    | 返回事务解析进度（用于框架状态判断） | `RustParser.tx_get_progress` |
+    | 导出 tx/state 数据访问接口（供 C 侧取数）；常用 `export_tx_data_get!` / `export_state_data_get!` 生成实现函数 | `RustParser.get_tx_data` / `get_state_data` |
+    | 挂接协议日志回调 | 注册函数末尾调用 `SCAppLayerParserRegisterLogger` |
 
     完成后，C 引擎可按“探测 -> 解析 -> 查询事务 -> 释放资源 -> 日志输出”完整回调链路运行。
 - `parser.rs` — 字节流协议解析与探测规则实现（如 `probe_*`）；对外注册到 `RustParser.probe_ts/probe_tc` 的回调函数通常定义在 `<proto>.rs`。
@@ -127,7 +127,15 @@
 不要实现复杂解析逻辑，先保证结构完整并可编译。
 ```
 
+**约束（与框架对接）**
+
+- `tx_id`：`Transaction::id()` 必须返回该值；在流内唯一且与 `get_tx(tx_id)` 语义一致（常用单调递增）。
+- `tx_data`：类型为 `AppLayerTxData`，供 `export_tx_data_get!` / `RustParser.get_tx_data` 取址；字段名推荐固定为 `tx_data`，否则勿用宏而手写等价回调。
+- `state_data`：类型为 `AppLayerStateData`，供 `export_state_data_get!` / `RustParser.get_state_data` 取址；字段名推荐固定为 `state_data`，否则需手写等价回调。
+- `state.tx_id`（计数器）：虽非 `State<T>` trait 强制字段，但应维护“已分配事务数/下一个事务 ID”，并与 `get_tx_count`、`get_tx(tx_id)` 语义保持一致。
+
 **产出物**
+
 - `Transaction` / `State` / `AppLayerEvent` 可用定义。
 
 **验收标准**
@@ -138,6 +146,7 @@
 ### 阶段 4：parser 与 probe
 
 **目标**
+
 - 用 `nom7::streaming` 建立可增量解析的底层 parser。
 
 **给 AI 的输入模板**

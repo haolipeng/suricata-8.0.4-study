@@ -557,7 +557,7 @@ UnconfirmedService ::= CHOICE {
 |--------|--------|------|
 | GetNameList 响应标识符数 | 64 条 | 防止超长列表占用过多内存 |
 | GetNamedVarListAttr 响应变量数 | 32 条 | 数据集变量列表截断 |
-| Read 响应���果数 | 64 条 | AccessResult 列表截断 |
+| Read 响应结果数 | 64 条 | AccessResult 列表截断 |
 | BER 递归解析深度 (`MAX_BER_DEPTH`) | 16 层 | 防止恶意嵌套导致栈溢出 |
 | COTP 分片重组缓冲区 | 1 MB | 防止内存耗尽 |
 | 流中最大事务数 | 256 个 | 限制单连接并发状态 |
