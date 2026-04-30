@@ -374,8 +374,7 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
     }
     const LoggerId logger_expectation = AppLayerParserProtocolGetLoggerBits(ipproto, alproto);
     if (logger_expectation == 0) {
-        SCLogDebug("bail: logger_expectation %u. LOGGER_FILE %u LOGGER_FILEDATA %u",
-                logger_expectation, LOGGER_FILE, LOGGER_FILEDATA);
+        SCLogDebug("bail: logger_expectation %u", logger_expectation);
         goto end;
     }
     SCLogDebug("pcap_cnt %" PRIu64, p->pcap_cnt);
@@ -424,6 +423,7 @@ static TmEcode OutputTxLog(ThreadVars *tv, Packet *p, void *thread_data)
         const int tx_progress_tc =
                 AppLayerParserGetStateProgress(ipproto, alproto, tx, tc_disrupt_flags);
         const bool tx_complete = (tx_progress_ts == complete_ts && tx_progress_tc == complete_tc);
+
 
         SCLogDebug("file_thread_data %p filedata_thread_data %p", op_thread_data->file,
                 op_thread_data->filedata);

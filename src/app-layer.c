@@ -1076,6 +1076,8 @@ static void AppLayerNamesSetup(void)
     AppProtoRegisterProtoString(ALPROTO_POP3, "pop3");
     AppProtoRegisterProtoString(ALPROTO_IEC61850_MMS, "iec61850-mms");
     AppProtoRegisterProtoString(ALPROTO_IEC104, "iec104");
+    AppProtoRegisterProtoString(ALPROTO_MYSQL, "mysql");
+    AppProtoRegisterProtoString(ALPROTO_REDIS, "redis");
     AppProtoRegisterProtoString(ALPROTO_HTTP, "http");
 }
 

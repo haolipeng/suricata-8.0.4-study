@@ -72,6 +72,8 @@ enum AppProtoEnum {
     ALPROTO_MDNS,
     ALPROTO_IEC61850_MMS,
     ALPROTO_IEC104,
+    ALPROTO_MYSQL,
+    ALPROTO_REDIS,
 
     // signature-only (ie not seen in flow)
     // HTTP for any version (ALPROTO_HTTP1 (version 1) or ALPROTO_HTTP2)

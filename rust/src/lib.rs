@@ -112,6 +112,8 @@ pub mod modbus;
 pub mod ike;
 pub mod snmp;
 
+pub mod mysql;
+pub mod redis;
 pub mod ntp;
 pub mod tftp;
 pub mod dhcp;

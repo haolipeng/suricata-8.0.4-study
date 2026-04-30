@@ -1822,6 +1822,8 @@ void AppLayerParserRegisterProtocolParsers(void)
     RegisterIMAPParsers();
     SCRegisterIec61850MmsParser();
     SCRegisterIec104Parser();
+    SCMysqlRegisterParser();
+    SCRedisRegisterParser();
 
     for (size_t i = 0; i < preregistered_callbacks_nb; i++) {
         PreRegisteredCallbacks[i]();

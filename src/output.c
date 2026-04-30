@@ -999,6 +999,10 @@ void OutputRegisterRootLoggers(void)
             ALPROTO_IEC61850_MMS, (EveJsonSimpleTxLogFunc)SCIec61850MmsLoggerLog, "iec61850_mms");
     RegisterSimpleJsonApplayerLogger(
             ALPROTO_IEC104, (EveJsonSimpleTxLogFunc)SCIec104LoggerLog, "iec104");
+    RegisterSimpleJsonApplayerLogger(
+            ALPROTO_MYSQL, (EveJsonSimpleTxLogFunc)SCMysqlLoggerLog, NULL);
+    RegisterSimpleJsonApplayerLogger(
+            ALPROTO_REDIS, (EveJsonSimpleTxLogFunc)SCRedisLoggerLog, NULL);
     RegisterSimpleJsonApplayerLogger(ALPROTO_RDP, (EveJsonSimpleTxLogFunc)SCRdpToJson, NULL);
     // special case : http2 is logged in http object
     RegisterSimpleJsonApplayerLogger(ALPROTO_HTTP2, (EveJsonSimpleTxLogFunc)SCHttp2LogJson, "http");
@@ -1256,6 +1260,14 @@ void OutputRegisterLoggers(void)
     /* IEC 61850 MMS JSON logger */
     OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonIec61850MmsLog", "eve-log.iec61850_mms",
             OutputJsonLogInitSub, ALPROTO_IEC61850_MMS, JsonGenericDirPacketLogger,
+            JsonLogThreadInit, JsonLogThreadDeinit);
+    /* MySQL JSON logger */
+    OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonMysqlLog", "eve-log.mysql",
+            OutputJsonLogInitSub, ALPROTO_MYSQL, JsonGenericDirPacketLogger,
+            JsonLogThreadInit, JsonLogThreadDeinit);
+    /* Redis JSON logger */
+    OutputRegisterTxSubModule(LOGGER_JSON_TX, "eve-log", "JsonRedisLog", "eve-log.redis",
+            OutputJsonLogInitSub, ALPROTO_REDIS, JsonGenericDirPacketLogger,
             JsonLogThreadInit, JsonLogThreadDeinit);
 
     for (size_t i = 0; i < preregistered_loggers_nb; i++) {
