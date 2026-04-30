@@ -303,6 +303,35 @@ static void EveHttpLogJSONExtended(SCJsonBuilder *js, htp_tx_t *tx)
                 (uint32_t)htp_header_value_len(h_location));
     }
 
+    /* Server banner：从 Server 响应头中提取软件名和版本号
+     * 例如 "nginx/1.24.0" -> name="nginx", version="1.24.0"
+     *      "Apache/2.4.58" -> name="Apache", version="2.4.58"
+     *      "Apache/2.4.58 (Ubuntu)" -> name="Apache", version="2.4.58"
+     */
+    const htp_header_t *h_server = htp_tx_response_header(tx, "server");
+    if (h_server != NULL) {
+        const uint8_t *sval = htp_header_value_ptr(h_server);
+        uint32_t slen = (uint32_t)htp_header_value_len(h_server);
+        if (sval != NULL && slen > 0) {
+            /* 查找名称与版本之间的 '/' 分隔符 */
+            const uint8_t *slash = memchr(sval, '/', slen);
+            if (slash != NULL && slash > sval) {
+                uint32_t name_len = (uint32_t)(slash - sval);
+                const uint8_t *ver_start = slash + 1;
+                uint32_t ver_remaining = slen - name_len - 1;
+                /* 版本号在空格处结束，或一直到字符串末尾 */
+                const uint8_t *ver_end = memchr(ver_start, ' ', ver_remaining);
+                uint32_t ver_len = ver_end ? (uint32_t)(ver_end - ver_start) : ver_remaining;
+                if (ver_len > 0) {
+                    SCJbOpenObject(js, "server_banner");
+                    SCJbSetStringFromBytes(js, "software_name", sval, name_len);
+                    SCJbSetStringFromBytes(js, "software_version", ver_start, ver_len);
+                    SCJbClose(js);
+                }
+            }
+        }
+    }
+
     /* length */
     SCJbSetUint(js, "length", htp_tx_response_message_len(tx));
 }
