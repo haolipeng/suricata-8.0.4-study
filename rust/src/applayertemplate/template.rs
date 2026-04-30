@@ -42,10 +42,10 @@ enum TemplateEvent {
 
 pub struct TemplateTransaction {
     tx_id: u64,
-    pub request: Option<String>,
-    pub response: Option<String>,
+    pub request: Option<String>, //请求消息
+    pub response: Option<String>, //响应消息
 
-    tx_data: AppLayerTxData,
+    tx_data: AppLayerTxData, //框架要求的元数据
 }
 
 impl Default for TemplateTransaction {
@@ -75,7 +75,7 @@ impl Transaction for TemplateTransaction {
 pub struct TemplateState {
     state_data: AppLayerStateData,
     tx_id: u64,
-    transactions: VecDeque<TemplateTransaction>,
+    transactions: VecDeque<TemplateTransaction>, //一个队列装所有事务
     request_gap: bool,
     response_gap: bool,
 }
