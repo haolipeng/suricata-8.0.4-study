@@ -261,11 +261,13 @@ fn log_mms_pdu(pdu: &MmsPdu, js: &mut JsonBuilder) -> Result<(), JsonError> {
 
 /// 输出一个事务的完整 EVE JSON 日志：iec61850_mms { direction: "...", pdu_type: "...", ... }
 fn log_iec61850_mms(tx: &MmsTransaction, js: &mut JsonBuilder) -> Result<(), JsonError> {
+    let Some(ref pdu) = tx.pdu else {
+        return Ok(());
+    };
+
     js.open_object("iec61850_mms")?;
     js.set_string("direction", if tx.is_request { "request" } else { "response" })?;
-    if let Some(ref pdu) = tx.pdu {
-        log_mms_pdu(pdu, js)?;
-    }
+    log_mms_pdu(pdu, js)?;
     js.close()?;
     Ok(())
 }

@@ -1195,6 +1195,40 @@ mod tests {
         assert_eq!(state.conn_state, MmsConnState::Concluding);
     }
 
+    #[test]
+    fn test_direct_constructed_cancel_pdus_match_real_capture() {
+        let mut state = MmsState::new();
+        state.conn_state = MmsConnState::MmsAssociated;
+
+        let cancel_req = [
+            0x03, 0x00, 0x00, 0x0A,
+            0x02, 0xF0, 0x80,
+            0xA5, 0x01, 0x2A,
+        ];
+        let result = state.parse_request(&cancel_req);
+        assert_eq!(result, AppLayerResult { status: 0, consumed: 0, needed: 0 });
+        assert_eq!(state.tx_id, 1);
+        match state.transactions.front().and_then(|tx| tx.pdu.as_ref()) {
+            Some(MmsPdu::CancelRequest { invoke_id }) if *invoke_id == 42 => {}
+            other => panic!("Expected CancelRequest from 0xA5012A, got {:?}", other),
+        }
+        assert_eq!(state.conn_state, MmsConnState::MmsAssociated);
+
+        let cancel_resp = [
+            0x03, 0x00, 0x00, 0x0A,
+            0x02, 0xF0, 0x80,
+            0xA6, 0x01, 0x2A,
+        ];
+        let result = state.parse_response(&cancel_resp);
+        assert_eq!(result, AppLayerResult { status: 0, consumed: 0, needed: 0 });
+        assert_eq!(state.tx_id, 2);
+        match state.transactions.back().and_then(|tx| tx.pdu.as_ref()) {
+            Some(MmsPdu::CancelResponse { invoke_id }) if *invoke_id == 42 => {}
+            other => panic!("Expected CancelResponse from 0xA6012A, got {:?}", other),
+        }
+        assert_eq!(state.conn_state, MmsConnState::MmsAssociated);
+    }
+
     // ====== 畸形数据测试 ======
 
     /// 直接 MMS 标签但 BER 编码无效 → parse_mms_pdu 失败 → MalformedData 事务

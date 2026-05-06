@@ -712,6 +712,82 @@ mod tests {
         assert_eq!(MmsPdu::CancelError.invoke_id(), None);
     }
 
+    #[test]
+    fn test_logger_and_detect_accessor_contract() {
+        let write_pdu = MmsPdu::ConfirmedRequest {
+            invoke_id: 99,
+            service: MmsConfirmedService::Write,
+            read_info: None,
+            write_info: Some(MmsWriteRequest {
+                variable_specs: vec![
+                    ObjectNameRef::DomainSpecific {
+                        domain_id: "IED1LD0".to_string(),
+                        item_id: "GGIO1$ST$Ind1$stVal".to_string(),
+                    },
+                    ObjectNameRef::VmdSpecific("GlobalWrite".to_string()),
+                ],
+                data: vec![],
+            }),
+            get_name_list_info: None,
+            get_var_access_attr_info: None,
+            get_named_var_list_attr_info: None,
+            file_open_info: None,
+            file_read_info: None,
+        };
+
+        assert_eq!(write_pdu.pdu_type_str(), "confirmed_request");
+        assert_eq!(write_pdu.service_str(), Some("write"));
+        assert_eq!(write_pdu.invoke_id(), Some(99));
+        assert_eq!(write_pdu.first_write_domain(), Some("IED1LD0"));
+        assert_eq!(write_pdu.first_write_variable(), Some("GGIO1$ST$Ind1$stVal"));
+        assert_eq!(write_pdu.file_name(), None);
+
+        let file_pdu = MmsPdu::ConfirmedRequest {
+            invoke_id: 7,
+            service: MmsConfirmedService::FileOpen,
+            read_info: None,
+            write_info: None,
+            get_name_list_info: None,
+            get_var_access_attr_info: None,
+            get_named_var_list_attr_info: None,
+            file_open_info: Some(MmsFileOpenRequest {
+                file_name: "firmware/update.bin".to_string(),
+                initial_position: 128,
+            }),
+            file_read_info: None,
+        };
+
+        assert_eq!(file_pdu.pdu_type_str(), "confirmed_request");
+        assert_eq!(file_pdu.service_str(), Some("file_open"));
+        assert_eq!(file_pdu.invoke_id(), Some(7));
+        assert_eq!(file_pdu.first_write_domain(), None);
+        assert_eq!(file_pdu.first_write_variable(), None);
+        assert_eq!(file_pdu.file_name(), Some("firmware/update.bin"));
+    }
+
+    #[test]
+    fn test_accessor_none_contract_for_non_field_pdus() {
+        let pdus = vec![
+            MmsPdu::InitiateRequest { detail: None },
+            MmsPdu::InitiateResponse { detail: None },
+            MmsPdu::ConcludeRequest,
+            MmsPdu::ConcludeResponse,
+            MmsPdu::ConfirmedError {
+                invoke_id: 11,
+                error_class: Some("access".to_string()),
+                error_code: Some("object-non-existent".to_string()),
+            },
+            MmsPdu::RejectPdu { invoke_id: None },
+        ];
+
+        for pdu in pdus {
+            assert_eq!(pdu.service_str(), None);
+            assert_eq!(pdu.first_write_variable(), None);
+            assert_eq!(pdu.first_write_domain(), None);
+            assert_eq!(pdu.file_name(), None);
+        }
+    }
+
     // ====== first_write_variable / first_write_domain 测试 ======
 
     /// 构造一个 Write 请求 PDU 的辅助函数
